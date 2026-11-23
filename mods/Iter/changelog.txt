@@ -1,3 +1,23 @@
+Revision 203:
+- restored the e_so_ntl_idle_look3 workaround (CopLogicIdle._perform_objective_action) [courtesy of BangL]
+- restored the cops chase mode of Full Speed Swarm (iter_chase) using the path ahead feature of the game [courtesy of BangL]
+- restored coarse path searches towards the real destination (CopBrain:search_for_coarse_path) [courtesy of BangL]
+- restored streamlined coarse paths for the U247+ navigation: doors between nav segments are chosen so that paths have less detours, nav links are chosen taking their congestion into account (nav segment proxies and choke points are gone) [courtesy of BangL]
+- restored direct paths to the objective in stealth when no nav link is needed [courtesy of BangL]
+- restored waypoints at doors for converted cops, team AI and phalanx [courtesy of BangL]
+- restored path ahead for walking cops: the next steps are appended to the walk action while it is still running, so cops do not stop at every nav segment [courtesy of BangL]
+- restored coarse path simplification and the handling of followers (stop when the followed unit is in the same nav segment) [courtesy of BangL]
+- restored the path optimization of team AI when reviving or in stealth [courtesy of BangL]
+- MissionScript:load skips instance point elements without a load function like the game does [courtesy of BangL]
+
+Revision 202:
+- restored navlink queueing and the extended shortcut finder of option "Improve NPC pathing", adapted to the U247+ navigation (door lists with positions, string nav segment IDs) [courtesy of BangL]
+- streamlined paths are still removed (for now) [courtesy of BangL]
+
+Revision 201:
+- removed the "Improve NPC pathing" option and all its overrides (navigationmanager, cop/civilian/team AI travel, walk, brain and group AI state) [courtesy of BangL]
+- added nil checks and string keys to nav segment neighbours handling (ElementAINavSeg, clbk_navfield) [courtesy of BangL]
+
 Revision 200:
 - [Escape: Park] moved useless navmesh far away to prevent Z confusion
 

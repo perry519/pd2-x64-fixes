@@ -6,13 +6,11 @@ else
 end
 
 dofile(Iter._path .. 'lua/_navdatapatches.lua')
+local Geometry = assert(blt.vm.loadfile(Iter._path .. 'lua/_navgeometry.lua'))()
+assert(type(Geometry) == 'table' and type(Geometry.new) == 'function', 'Iter: navigation geometry failed to load')
 
-local mvec3_add = mvector3.add
 local mvec3_ang = mvector3.angle
 local mvec3_dis = mvector3.distance
-local mvec3_dis_sq = mvector3.distance_sq
-local mvec3_div = mvector3.divide
-local mvec3_lerp = mvector3.lerp
 local mvec3_set = mvector3.set
 local mvec3_sub = mvector3.subtract
 local mvec3_z = mvector3.z
@@ -21,39 +19,27 @@ local math_max = math.max
 local table_insert = table.insert
 local table_remove = table.remove
 
-local itr_nav_log_counts = {}
-local function itr_log_nav_check(log_key, msg)
-	local count = (itr_nav_log_counts[log_key] or 0) + 1
-	itr_nav_log_counts[log_key] = count
-	if count <= 10 or count % 100 == 0 then Iter:log(('[nav-check][%s #%i] %s'):format(log_key, count, msg)) end
-end
-
-local function itr_count_table(t)
-	local count = 0
-	if t then
-		for _ in pairs(t) do
-			count = count + 1
-		end
-	end
-	return count
-end
-
+local EMPTY = {}
 local tmp_vec1 = Vector3()
-local itr_native_connections = NavigationManager._send_nav_field_to_engine ~= nil
 
-local function itr_resolve_nav_seg_id(all_nav_segments, nav_seg_id)
-	if nav_seg_id == nil or not all_nav_segments then return nav_seg_id end
-	if all_nav_segments[nav_seg_id] then return nav_seg_id end
+local function itr_seg_id(all_nav_segments, nav_seg_id)
+	if nav_seg_id == nil or all_nav_segments[nav_seg_id] then
+		return nav_seg_id
+	end
 	local string_id = tostring(nav_seg_id)
-	if all_nav_segments[string_id] then return string_id end
-	local number_id = tonumber(nav_seg_id)
-	return number_id and all_nav_segments[number_id] and number_id or nav_seg_id
+	return all_nav_segments[string_id] and string_id or nav_seg_id
 end
 
-local function itr_release_navlink(self, element)
+local function itr_navlink_element(navlink)
+	local script_data = navlink:script_data()
+	return script_data and script_data.element
+end
+
+local function itr_release_navlink(element)
 	local action = element.itr_reserved_by_action
-	if action then Iter:count_runtime(self, 'released') end
-	if action and action.itr_reserved_navlink_element == element then action.itr_reserved_navlink_element = nil end
+	if action and action.itr_reserved_navlink_element == element then
+		action.itr_reserved_navlink_element = nil
+	end
 	element.itr_reserved_by_action = nil
 	element.itr_reserved_by_unit = nil
 	element.itr_navlink_queue_frame_t = nil
@@ -61,6 +47,90 @@ local function itr_release_navlink(self, element)
 	element.itr_navlink_queue_previous_oldest_t = nil
 	element.itr_navlink_queue_length_in_progress = nil
 	element.itr_navlink_queue_length = nil
+end
+
+local function itr_reset_navigation(self)
+	self.itr_nav = nil
+	self.itr_nav_failed = nil
+	self.itr_coarse_cache = {}
+	self.itr_navlink_planned_use = {}
+end
+
+local ENTRANCE_LEVELS = { gallery = true, framing_frame_1 = true }
+local function itr_gallery_entrance_blocked(self, from, to, portal)
+	if not (from == '13' and to == '1' or from == '1' and to == '13') then
+		return false
+	end
+	if math_abs(portal.x - 2325) >= 1 or math_abs(portal.y) >= 300 then
+		return false
+	end
+	local hit = self:raycast({
+		pos_from = Vector3(2500, portal.y, portal.z),
+		pos_to = Vector3(2250, portal.y, portal.z),
+		allow_entry = false,
+	})
+	return hit and true or false
+end
+
+function NavigationManager:itr_make_neighbours_list(navseg_id)
+	local geo = self.itr_nav
+	if not geo then
+		return
+	end
+	local all_nav_segments = self._nav_segments
+	navseg_id = itr_seg_id(all_nav_segments, navseg_id)
+	local list = {}
+	for neighbour_seg_id in pairs(geo.links[navseg_id] or EMPTY) do
+		local neighbour_seg = all_nav_segments[neighbour_seg_id]
+		if neighbour_seg and not neighbour_seg.disabled then
+			table_insert(list, neighbour_seg_id)
+		end
+	end
+	geo.enabled[navseg_id] = list
+end
+
+-- Resyncs private views of changed directed pairs from the native graph; hints follow static door changes.
+local function itr_sync_pairs(self, changed_pairs)
+	local geo = self.itr_nav
+	if not geo then
+		return false
+	end
+	local all_nav_segments = self._nav_segments
+	local dirty, any_change
+	for _, pair in ipairs(changed_pairs) do
+		local from, to = itr_seg_id(all_nav_segments, pair[1]), itr_seg_id(all_nav_segments, pair[2])
+		local segment = all_nav_segments[from]
+		if segment then
+			local doors_changed, entries_changed = geo:set_pair(from, to, segment.neighbours[to])
+			if doors_changed then
+				dirty = dirty or {}
+				dirty[from] = true
+				dirty[to] = true
+			end
+			any_change = any_change or entries_changed
+			self:itr_make_neighbours_list(from)
+		end
+	end
+	if dirty then
+		geo:refresh(dirty)
+	end
+	return any_change
+end
+
+local function itr_refresh_gallery_entrance(self)
+	local geo = self.itr_nav
+	if geo and geo.blocked and itr_sync_pairs(self, { { '13', '1' }, { '1', '13' } }) then
+		self.itr_coarse_cache = {}
+	end
+end
+
+local function itr_on_graph_changed(self, changed_pairs)
+	self.itr_coarse_cache = {}
+	local geo = self.itr_nav
+	if geo then
+		geo.free_points = {}
+		itr_sync_pairs(self, changed_pairs)
+	end
 end
 
 local itr_original_navigationmanager_registercoverunits = NavigationManager.register_cover_units
@@ -84,25 +154,10 @@ function NavigationManager:register_cover_units()
 	self._debug = _debug
 end
 
-function NavigationManager:itr_make_neighbours_list(navseg_id)
-	navseg_id = itr_resolve_nav_seg_id(self._nav_segments, navseg_id)
-	local navseg = self._nav_segments and self._nav_segments[navseg_id]
-	if not navseg then return end
-
-	local list = {}
-	for neighbour_seg_id in pairs(navseg.neighbours or {}) do
-		local neighbour_seg = self._nav_segments[neighbour_seg_id]
-		if neighbour_seg and not neighbour_seg.disabled then table.insert(list, neighbour_seg_id) end
-	end
-	navseg.itr_enabled_neighbours_i = list
-end
-
 local itr_original_navigationmanager_registeranimnavlink = NavigationManager.register_anim_nav_link
 function NavigationManager:register_anim_nav_link(element)
-	self.itr_navlink_elements = self.itr_navlink_elements or {}
-	self.itr_navlink_planned_use = self.itr_navlink_planned_use or {}
 	local values = element._values
-	if values.itr_interval == nil then
+	if not values.itr_from_navseg then
 		local intervals = {
 			e_nl_fwd_2m = 0,
 			e_nl_fwd_4m = 1,
@@ -140,52 +195,31 @@ function NavigationManager:register_anim_nav_link(element)
 
 	local nav_link = element:nav_link()
 	if nav_link then
-		self.itr_navlink_elements[nav_link:key()] = element
 		values.itr_from_navseg = nav_link:start_nav_segment()
 		values.itr_to_navseg = nav_link:end_nav_segment()
+		itr_on_graph_changed(self, { { values.itr_from_navseg, values.itr_to_navseg } })
 	end
-	if
-		nav_link
-		and values.itr_window == 'itr_navlink_window1_in'
-		and tonumber(values.itr_from_navseg) == 19
-		and tonumber(values.itr_to_navseg) == 1
-	then
-		self.itr_gallery_windows = true
-	end
-	self.itr_coarse_cache = {}
 end
 
 local itr_original_navigationmanager_unregisteranimnavlink = NavigationManager.unregister_anim_nav_link
 function NavigationManager:unregister_anim_nav_link(element)
-	if element._values.itr_window == 'itr_navlink_window1_in' then
-		self.itr_gallery_windows = nil
-		self.itr_gallery_entrance_blocked = nil
-		self.itr_gallery_entrance_signature = nil
-	end
 	local nav_link = element:nav_link()
 	if nav_link then
 		local link_key = nav_link:key()
 		local from, to = nav_link:start_nav_segment(), nav_link:end_nav_segment()
 		nav_link:set_delay_time(604800)
 		itr_original_navigationmanager_unregisteranimnavlink(self, element)
-		itr_release_navlink(self, element)
-		self.itr_navlink_elements[link_key] = nil
-		self.itr_navlink_planned_use[link_key] = nil
-		self.itr_coarse_cache = {}
-		self:itr_make_neighbours_list(from)
-		self:itr_make_neighbours_list(to)
+		itr_release_navlink(element)
+		if self.itr_navlink_planned_use then
+			self.itr_navlink_planned_use[link_key] = nil
+		end
+		itr_on_graph_changed(self, { { from, to } })
 	end
 end
 
 local itr_original_navigationmanager_clbknavfield = NavigationManager.clbk_navfield
 function NavigationManager:clbk_navfield(event_name, args, args2, args3)
 	local fuckery
-	local refresh_neighbour_doors = event_name == 'add_nav_seg_neighbours'
-		or event_name == 'remove_nav_seg_neighbours'
-		or event_name == 'obstruct_nav_link'
-		or event_name == 'unobstruct_nav_link'
-	if refresh_neighbour_doors then Iter:count_runtime(self, 'nav_events') end
-
 	if event_name == 'add_nav_seg_neighbours' then
 		for nav_seg_id in pairs(args) do
 			local nav_seg = self._nav_segments[nav_seg_id]
@@ -207,768 +241,85 @@ function NavigationManager:clbk_navfield(event_name, args, args2, args3)
 		end
 	end
 
-	if refresh_neighbour_doors then self.itr_coarse_cache = {} end
-	if refresh_neighbour_doors and not itr_native_connections and self.itr_restore_numeric_neighbour_doors then
-		self:itr_restore_numeric_neighbour_doors()
-		local stats = self.itr_neighbour_door_stats or {}
-		itr_log_nav_check(
-			'runtime-neighbour-refresh',
-			('event=%s neighbour_pairs=%i mapped_doors=%i unmapped_vector_doors=%i passthrough_doors=%i'):format(
-				tostring(event_name),
-				stats.pairs or 0,
-				stats.mapped or 0,
-				stats.unmapped or 0,
-				stats.passthrough or 0
-			)
-		)
-	end
-
 	if event_name == 'add_nav_seg_neighbours' or event_name == 'remove_nav_seg_neighbours' then
+		local changed_pairs = {}
 		for nav_seg_id, neighbours in pairs(args) do
-			self:itr_make_neighbours_list(nav_seg_id)
-			for _, dfghjkrezt in ipairs(neighbours) do
-				self:itr_make_neighbours_list(dfghjkrezt)
+			for _, neighbour_seg_id in ipairs(neighbours) do
+				table_insert(changed_pairs, { nav_seg_id, neighbour_seg_id })
 			end
 		end
+		itr_on_graph_changed(self, changed_pairs)
+	elseif event_name == 'obstruct_nav_link' or event_name == 'unobstruct_nav_link' then
+		itr_on_graph_changed(self, { { args, args2 } })
 	end
 end
 
 local itr_original_navigationmanager_setnavsegmentstate = NavigationManager.set_nav_segment_state
 function NavigationManager:set_nav_segment_state(id, ...)
-	Iter:count_runtime(self, 'nav_events')
 	itr_original_navigationmanager_setnavsegmentstate(self, id, ...)
 	self.itr_coarse_cache = {}
-	id = itr_resolve_nav_seg_id(self._nav_segments, id)
-	for segment_id, segment in pairs(self._nav_segments or {}) do
-		if segment_id == id or segment.neighbours and segment.neighbours[id] then
+	local geo = self.itr_nav
+	if not geo then
+		return
+	end
+	id = itr_seg_id(self._nav_segments, id)
+	for segment_id, links in pairs(geo.links) do
+		if segment_id == id or links[id] then
 			self:itr_make_neighbours_list(segment_id)
 		end
 	end
 end
 
-local function itr_reset_navigation(self)
-	for _, element in pairs(self.itr_navlink_elements or {}) do
-		itr_release_navlink(self, element)
-		element._values.itr_from_navseg = nil
-		element._values.itr_to_navseg = nil
+for _, name in ipairs({ 'add_obstacle', 'remove_obstacle' }) do
+	local itr_original = NavigationManager[name]
+	NavigationManager[name] = function(self, ...)
+		local result = itr_original(self, ...)
+		itr_on_graph_changed(self, EMPTY)
+		return result
 	end
-	self.itr_navlink_elements = {}
-	self.itr_navlink_planned_use = {}
-	self.itr_coarse_cache = {}
-	self.itr_neighbour_doors = nil
-	self.itr_neighbour_door_stats = nil
-	self.itr_segment_doors = nil
-	self.itr_segment_room_neighbours = nil
-	self.itr_room_doors = nil
-	self.itr_load_data = nil
-	self.itr_gallery_windows = nil
-	self.itr_gallery_entrance_blocked = nil
-	self.itr_gallery_entrance_signature = nil
 end
 
 local itr_original_navigationmanager_clear = NavigationManager._clear
-if itr_original_navigationmanager_clear then
-	function NavigationManager:_clear(...)
-		for _, element in pairs(self.itr_navlink_elements or {}) do
-			element:set_nav_link(nil)
-			if self._nav_links then self._nav_links[element] = nil end
-		end
-		itr_reset_navigation(self)
-		Iter:log_runtime(self, 'clear')
-		self.itr_runtime_counts = nil
-		self.itr_runtime_log_t = nil
-		return itr_original_navigationmanager_clear(self, ...)
-	end
-end
-
-local itr_original_navigationmanager_setloaddata = NavigationManager.set_load_data
-function NavigationManager:set_load_data(data)
+function NavigationManager:_clear(...)
 	itr_reset_navigation(self)
-	Iter:log_runtime(self, 'reload')
-	self.itr_runtime_counts = {}
-	self.itr_runtime_log_t = nil
-
-	local result = itr_original_navigationmanager_setloaddata(self, data)
-	Iter:log(
-		('[runtime][loaded] level=%s path=%s streamline=%s role=%s'):format(
-			Iter:get_level_id(),
-			Iter._path,
-			tostring(Iter.settings.streamline_path),
-			Network:is_server() and 'host' or 'client'
-		)
-	)
-	return result
-end
-
-local itr_original_navigationmanager_update = NavigationManager.update
-function NavigationManager:update(t, dt)
-	itr_original_navigationmanager_update(self, t, dt)
-	if self.itr_runtime_counts and Iter.RUNTIME_LOGGING then
-		if not self.itr_runtime_log_t then self.itr_runtime_log_t = t + 10 end
-		if t >= self.itr_runtime_log_t then
-			self.itr_runtime_log_t = t + 10
-			Iter:log_runtime(self, 'activity')
-		end
-	end
-end
-
-if not Iter.settings.streamline_path then return end
-
-function NavigationManager:itr_get_all_doors_of_segment(segment_id)
-	if self.itr_segment_doors then
-		return self.itr_segment_doors[segment_id] or {}, self.itr_segment_room_neighbours[segment_id] or {}
-	end
-
-	local room_mask = {}
-	local nav_segment = self._nav_segments[segment_id]
-	if nav_segment and nav_segment.vis_groups and self._visibility_groups and next(nav_segment.vis_groups) then
-		for _, i_vis_group in ipairs(nav_segment.vis_groups) do
-			local vis_group = self._visibility_groups[i_vis_group]
-			local vis_group_rooms = vis_group and vis_group.rooms
-			if vis_group_rooms then
-				for i_room, _ in pairs(vis_group_rooms) do
-					room_mask[i_room] = true
-				end
-			end
-		end
-	end
-
-	local all_seg_doors = {}
-	local room_neighbours = {}
-	for door_id, door in pairs(self._room_doors) do
-		local door_rooms = door.rooms
-		local r1 = door_rooms[1]
-		local r2 = door_rooms[2]
-		local rm1 = room_mask[r1]
-		local rm2 = room_mask[r2]
-		if rm1 or rm2 then all_seg_doors[door_id] = door end
-		if not rm1 then
-			room_neighbours[r1] = true
-		elseif not rm2 then
-			room_neighbours[r2] = true
-		end
-	end
-	return all_seg_doors, room_neighbours
-end
-
-local function itr_pair_key(nav_seg_id1, nav_seg_id2) return tostring(nav_seg_id1) .. '\t' .. tostring(nav_seg_id2) end
-
-local function itr_same_nav_seg_id(nav_seg_id1, nav_seg_id2)
-	return nav_seg_id1 == nav_seg_id2 or tostring(nav_seg_id1) == tostring(nav_seg_id2)
-end
-
-local function itr_get_room_nav_seg(self, room_id)
-	local room = self._rooms and self._rooms[room_id]
-	local vis_group = room and self._visibility_groups and self._visibility_groups[room.vis_group]
-	return vis_group and vis_group.seg
-end
-
-function NavigationManager:itr_restore_numeric_neighbour_doors()
-	Iter:count_runtime(self, 'legacy_prepare')
-	self.itr_neighbour_doors = {}
-	self.itr_neighbour_door_stats = {}
-	self.itr_segment_doors = nil
-	self.itr_segment_room_neighbours = nil
-
-	if not self._rooms or not self._room_doors or not self._visibility_groups then
-		itr_log_nav_check('numeric-map-skipped', 'missing legacy nav data; Iter private neighbour door map not built')
-		return
-	end
-
-	local door_candidates = {}
-	local segment_doors = {}
-	local segment_room_neighbours = {}
-	local function index_segment_door(segment_id, other_segment_id, other_room_id, door_id, door)
-		if not segment_id then return end
-
-		local doors = segment_doors[segment_id]
-		if not doors then
-			doors = {}
-			segment_doors[segment_id] = doors
-		end
-		doors[door_id] = door
-
-		if not itr_same_nav_seg_id(segment_id, other_segment_id) then
-			local neighbour_rooms = segment_room_neighbours[segment_id]
-			if not neighbour_rooms then
-				neighbour_rooms = {}
-				segment_room_neighbours[segment_id] = neighbour_rooms
-			end
-			neighbour_rooms[other_room_id] = true
-		end
-	end
-
-	for door_id, door in pairs(self._room_doors) do
-		local rooms = door.rooms
-		local room1 = rooms and rooms[1]
-		local room2 = rooms and rooms[2]
-		local seg1 = room1 and itr_get_room_nav_seg(self, room1)
-		local seg2 = room2 and itr_get_room_nav_seg(self, room2)
-		index_segment_door(seg1, seg2, room2, door_id, door)
-		index_segment_door(seg2, seg1, room1, door_id, door)
-
-		if seg1 and seg2 then
-			local key1 = itr_pair_key(seg1, seg2)
-			local key2 = itr_pair_key(seg2, seg1)
-			door_candidates[key1] = door_candidates[key1] or {}
-			door_candidates[key2] = door_candidates[key2] or {}
-			table_insert(door_candidates[key1], door_id)
-			table_insert(door_candidates[key2], door_id)
-		end
-	end
-	self.itr_segment_doors = segment_doors
-	self.itr_segment_room_neighbours = segment_room_neighbours
-
-	local stats = {
-		mapped = 0,
-		pairs = 0,
-		passthrough = 0,
-		unmapped = 0,
-	}
-	local door_center = Vector3()
-	for segment_id, segment in pairs(self._nav_segments) do
-		if segment.neighbours then
-			local iter_segment_neighbours = {}
-			self.itr_neighbour_doors[segment_id] = iter_segment_neighbours
-
-			for neighbour_seg_id, door_list in pairs(segment.neighbours) do
-				stats.pairs = stats.pairs + 1
-				local iter_door_list = {}
-				iter_segment_neighbours[neighbour_seg_id] = iter_door_list
-				local candidates = door_candidates[itr_pair_key(segment_id, neighbour_seg_id)]
-				for i_door, door_pos in ipairs(door_list) do
-					local iter_door = door_pos
-					if candidates and door_pos and door_pos.x then
-						local best_door_id
-						local best_dis
-						for _, candidate_id in ipairs(candidates) do
-							local candidate = self._room_doors[candidate_id]
-							if candidate then
-								mvec3_lerp(door_center, candidate.pos, candidate.pos1, 0.5)
-								local dis = mvec3_dis_sq(door_pos, door_center)
-								if not best_dis or dis < best_dis then
-									best_dis = dis
-									best_door_id = candidate_id
-								end
-							end
-						end
-						if best_door_id then
-							iter_door = best_door_id
-							stats.mapped = stats.mapped + 1
-						else
-							stats.unmapped = stats.unmapped + 1
-						end
-					else
-						stats.passthrough = stats.passthrough + 1
-					end
-					iter_door_list[i_door] = iter_door
-				end
-			end
-		end
-	end
-	self.itr_neighbour_door_stats = stats
-	if stats.unmapped > 0 then
-		itr_log_nav_check(
-			'unmapped-vector-doors',
-			('%i x64 Vector3 doors were not mapped to Iter numeric doors'):format(stats.unmapped)
-		)
-	end
-end
-
-local function itr_is_gallery_entrance_portal(door)
-	return type(door) ~= 'number'
-		and door.x
-		and math_abs(door.x - 2325) < 1
-		and math_abs(door.y) < 300
-		and math_abs(door.z - 22.5) < 1
-end
-
-function NavigationManager:itr_refresh_gallery_entrance()
-	if not itr_native_connections or not self.itr_gallery_windows then return end
-	local outside_id = itr_resolve_nav_seg_id(self._nav_segments, 13)
-	local inside_id = itr_resolve_nav_seg_id(self._nav_segments, 1)
-	local outside = self._nav_segments and self._nav_segments[outside_id]
-	local doors = outside and outside.neighbours and outside.neighbours[inside_id]
-	local blocked, signature = {}, {}
-	for _, door in ipairs(doors or {}) do
-		-- Audited Gallery lobby boundary. Probe across each portal, not along its wall.
-		if itr_is_gallery_entrance_portal(door) then
-			local hit = self:raycast({
-				pos_from = Vector3(2500, door.y, door.z),
-				pos_to = Vector3(2250, door.y, door.z),
-				allow_entry = false,
-			})
-			blocked[door.y] = hit or nil
-			signature[#signature + 1] = tostring(door.y) .. ':' .. tostring(not hit)
-		end
-	end
-	signature = table.concat(signature, ',')
-	self.itr_gallery_entrance_blocked = blocked
-	if signature ~= self.itr_gallery_entrance_signature then
-		self.itr_gallery_entrance_signature = signature
-		self.itr_coarse_cache = {}
-	end
+	return itr_original_navigationmanager_clear(self, ...)
 end
 
 function NavigationManager:itr_get_neighbour_door_list(segment_id, neighbour_seg_id)
-	segment_id = itr_resolve_nav_seg_id(self._nav_segments, segment_id)
-	neighbour_seg_id = itr_resolve_nav_seg_id(self._nav_segments, neighbour_seg_id)
-	local destination = self._nav_segments and self._nav_segments[neighbour_seg_id]
-	if not destination or destination.disabled then return end
-	local iter_segment_neighbours = self.itr_neighbour_doors and self.itr_neighbour_doors[segment_id]
-	if not itr_native_connections and iter_segment_neighbours and iter_segment_neighbours[neighbour_seg_id] then
-		return iter_segment_neighbours[neighbour_seg_id]
-	end
-
-	local segment = self._nav_segments and self._nav_segments[segment_id]
-	local door_list = segment and segment.neighbours and segment.neighbours[neighbour_seg_id]
-	local blocked = self.itr_gallery_entrance_blocked
-	if
-		door_list
-		and blocked
-		and (
-			(tonumber(segment_id) == 13 and tonumber(neighbour_seg_id) == 1)
-			or (tonumber(segment_id) == 1 and tonumber(neighbour_seg_id) == 13)
-		)
-	then
-		local usable = {}
-		for _, door in ipairs(door_list) do
-			if not (itr_is_gallery_entrance_portal(door) and blocked[door.y]) then usable[#usable + 1] = door end
-		end
-		return usable
-	end
-	return door_list
-end
-
-function NavigationManager:itr_get_room_to_doors(segment_id, all_seg_doors)
-	local result = {}
-	for door_id, door in pairs(all_seg_doors) do
-		for _, room_id in ipairs(door.rooms) do
-			if itr_same_nav_seg_id(segment_id, itr_get_room_nav_seg(self, room_id)) then
-				local ri = result[room_id]
-				if not ri then
-					ri = {}
-					result[room_id] = ri
-				end
-				table_insert(ri, door_id)
-			end
-		end
-	end
-	return result
-end
-
-function NavigationManager:itr_is_contiguous(level, door_flood_levels, room_to_doors)
-	local all_doors = self._room_doors
-	local level_doors = {}
-	local room_pool = {}
-	for door_id, door_level in pairs(door_flood_levels) do
-		if door_level == level then
-			level_doors[door_id] = true
-			for _, room_id in ipairs(all_doors[door_id].rooms) do
-				if room_to_doors[room_id] then room_pool[room_id] = true end
-			end
-		end
-	end
-
-	local start = next(room_pool)
-	if not start then return false end
-	local to_process = { [start] = true }
-	local stop
-	repeat
-		stop = true
-		local old_to_process = to_process
-		to_process = {}
-		for base_room_id, _ in pairs(old_to_process) do
-			room_pool[base_room_id] = nil
-			for _, door_id in pairs(room_to_doors[base_room_id]) do
-				for _, room_id in ipairs(all_doors[door_id].rooms) do
-					if room_pool[room_id] then
-						to_process[room_id] = true
-						stop = false
-					end
-				end
-				level_doors[door_id] = nil
-			end
-		end
-	until stop
-
-	return not next(level_doors)
-end
-
-function NavigationManager:itr_flood(from_doors, room_to_doors)
-	local door_flood_levels = {}
-	local to_process = {}
-	local level = 1
-	for _, door_id in pairs(from_doors) do
-		if type(door_id) == 'number' then
-			door_flood_levels[door_id] = level
-			to_process[door_id] = true
-		end
-	end
-
-	local all_doors = self._room_doors
-	local door_level_counts = {}
-	door_level_counts[1] = #from_doors
-	local stop
-	repeat
-		stop = true
-		level = level + 1
-		local old_to_process = to_process
-		to_process = {}
-		for base_door_id in pairs(old_to_process) do
-			for _, room_id in ipairs(all_doors[base_door_id].rooms) do
-				local next_doors = room_to_doors[room_id]
-				if next_doors then
-					for _, door_id in ipairs(next_doors) do
-						if not door_flood_levels[door_id] and not to_process[door_id] then
-							to_process[door_id] = true
-							door_flood_levels[door_id] = level
-							local cnt = door_level_counts[level]
-							door_level_counts[level] = cnt and cnt + 1 or 1
-							stop = false
-						end
-					end
-				end
-			end
-		end
-	until stop
-
-	local room_flood_levels = {}
-	for door_id, level in pairs(door_flood_levels) do
-		for _, room_id in ipairs(all_doors[door_id].rooms) do
-			if room_to_doors[room_id] then -- to filter rooms of this segment
-				local room_level = room_flood_levels[room_id]
-				room_flood_levels[room_id] = room_level and math.min(room_level, level) or level
-			end
-		end
-	end
-
-	return room_flood_levels, door_flood_levels, door_level_counts
-end
-
-function NavigationManager:itr_find_choke_point(
-	room_flood_levels,
-	room_level_counts,
-	room_to_doors,
-	door_flood_levels,
-	important_rooms
-)
-	local lower_levels_contiguity = true
-	local level_max = #room_level_counts
-	local threshold = math_max(4, level_max / 2)
-	for level, count in pairs(room_level_counts) do
-		if level > threshold or level == level_max then break end
-		if lower_levels_contiguity then
-			lower_levels_contiguity = self:itr_is_contiguous(level, door_flood_levels, room_to_doors)
-		end
-		if count == 1 then -- choke point exists
-			for room_id, room_level in pairs(room_flood_levels) do
-				if room_level == level and important_rooms[room_id] then
-					local room_data = self._rooms[room_id]
-					if room_data then
-						local r_borders = room_data.borders
-						local r_height = room_data.height
-						return Vector3(
-							(r_borders.x_pos + r_borders.x_neg) / 2,
-							(r_borders.y_pos + r_borders.y_neg) / 2,
-							(r_height.xp_yp + r_height.xn_yn) / 2
-						),
-							lower_levels_contiguity
-					end
-				end
-			end
-			break
-		end
-	end
-end
-
-local tmp_vec = Vector3()
-local function itr_add_door_pos_to(self, sum_pos, all_doors, i_door)
-	if type(i_door) == 'number' then
-		local door = all_doors[i_door]
-		if door then
-			mvec3_lerp(tmp_vec, door.pos, door.pos1, 0.5)
-			mvec3_add(sum_pos, tmp_vec)
-		end
-	elseif i_door and i_door.x then
-		mvec3_add(sum_pos, i_door)
-	elseif alive(i_door) then
-		local start_pos = self.itr_navlink_elements[i_door:key()]:value('position')
-		mvec3_add(sum_pos, start_pos)
-	end
-end
-
-local function itr_get_rooms_having_access_to_next_level(all_doors, room_to_doors, room_flood_levels, room_neighbours)
-	local result = {}
-	for room_id, room_level in pairs(room_flood_levels) do
-		for _, door_id in ipairs(room_to_doors[room_id]) do
-			local rooms = all_doors[door_id].rooms
-			local other_room_id = rooms[1] == room_id and rooms[2] or rooms[1]
-			local other_room_level = room_flood_levels[other_room_id]
-			-- next level OR other navseg
-			if
-				other_room_level and other_room_level > room_level
-				or not other_room_level and room_level ~= 1 and room_neighbours[other_room_id]
-			then
-				result[room_id] = room_level
-				break
-			end
-		end
-	end
-	return result
-end
-
-function NavigationManager:itr_find_proxies(segment_id)
-	local choke_points, choke_point_proxies = {}, {}
-	local in_proxies = {}
-	local out_proxies = {}
-	local all_doors = self._room_doors
 	local all_nav_segments = self._nav_segments
-	local segment = all_nav_segments[segment_id]
-	local all_seg_doors, room_neighbours = self:itr_get_all_doors_of_segment(segment_id)
-	local room_to_doors = self:itr_get_room_to_doors(segment_id, all_seg_doors)
-
-	local segment_neighbours = self.itr_neighbour_doors and self.itr_neighbour_doors[segment_id]
-		or segment.neighbours
-		or {}
-	for neighbour_seg_id, door_list in pairs(segment_neighbours) do
-		local best_level
-		local min_count = 1000
-		local level1_contiguous
-		local room_flood_levels, door_flood_levels, door_level_counts = self:itr_flood(door_list, room_to_doors)
-
-		local important_rooms =
-			itr_get_rooms_having_access_to_next_level(all_doors, room_to_doors, room_flood_levels, room_neighbours)
-		local important_doors = {}
-		local room_level_counts = {}
-		for room_id, level in pairs(important_rooms) do
-			room_level_counts[level] = room_level_counts[level] and room_level_counts[level] + 1 or 1
-			if level == 1 then
-				for _, door_id in ipairs(room_to_doors[room_id]) do
-					if door_flood_levels[door_id] == 1 then table_insert(important_doors, door_id) end
-				end
-			end
-		end
-
-		for level, count in pairs(door_level_counts) do
-			if not self:itr_is_contiguous(level, door_flood_levels, room_to_doors) then break end
-			if count <= min_count then
-				best_level = level
-				min_count = count
-			end
-			if level == 1 then
-				level1_contiguous = true
-			elseif level > 4 then
-				break
-			end
-		end
-
-		if best_level and table.size(all_seg_doors) > 20 then
-			local cnt = 0
-			local pos = Vector3(0, 0, 0)
-			for door_id, level in pairs(door_flood_levels) do
-				if level == best_level then
-					itr_add_door_pos_to(self, pos, all_doors, door_id)
-					cnt = cnt + 1
-				end
-			end
-			if cnt > 0 and cnt < 5 then
-				mvec3_div(pos, cnt)
-				out_proxies[neighbour_seg_id] = pos
-			end
-		end
-
-		local neighbour_segment = all_nav_segments[neighbour_seg_id]
-		local neighbour_in_proxies = neighbour_segment and neighbour_segment.in_proxies
-		local already_done = neighbour_in_proxies and neighbour_in_proxies[segment_id]
-		if already_done ~= nil then
-			in_proxies[neighbour_seg_id] = already_done
-		elseif level1_contiguous then
-			local cnt = 0
-			local frontier_center = Vector3(0, 0, 0)
-			for _, door_id in ipairs(important_doors) do
-				itr_add_door_pos_to(self, frontier_center, all_doors, door_id)
-				cnt = cnt + 1
-			end
-			if cnt > 2 then
-				mvec3_div(frontier_center, cnt)
-				local metawidth = 0
-				for _, door_id in ipairs(important_doors) do
-					local dis
-					if type(door_id) == 'number' then
-						local door = all_doors[door_id]
-						mvec3_lerp(tmp_vec, door.pos, door.pos1, 0.5)
-						dis = mvec3_dis_sq(frontier_center, tmp_vec)
-					elseif alive(door_id) then
-						dis = mvec3_dis_sq(frontier_center, self.itr_navlink_elements[door_id:key()]:value('position'))
-					end
-					if dis and dis > metawidth then metawidth = dis end
-				end
-				in_proxies[neighbour_seg_id] = metawidth < (150 * 150) and frontier_center or nil
-			end
-		end
-
-		if #door_list > 1 then
-			local choke_point_pos, lower_levels_contiguity = self:itr_find_choke_point(
-				room_flood_levels,
-				room_level_counts,
-				room_to_doors,
-				door_flood_levels,
-				important_rooms
-			)
-			if choke_point_pos then
-				local choke_pos = choke_point
-				choke_points[neighbour_seg_id] = choke_point_pos
-
-				if lower_levels_contiguity then
-					-- pick the closest important door
-					local best_pos = Vector3()
-					local min_dis = 1000000000
-					for _, door_id in ipairs(important_doors) do
-						local door = all_doors[door_id]
-						if mvec3_dis_sq(door.pos, door.pos1) > 2500 then
-							mvec3_lerp(tmp_vec, door.pos, door.pos1, 0.5)
-							local dis = mvec3_dis_sq(tmp_vec, choke_point_pos)
-							if dis < min_dis then
-								min_dis = dis
-								mvec3_set(best_pos, tmp_vec)
-							end
-						else
-							for _, pos in ipairs({ door.pos, door.pos1 }) do
-								local dis = mvec3_dis_sq(pos, choke_point_pos)
-								if dis < min_dis then
-									min_dis = dis
-									mvec3_set(best_pos, pos)
-								end
-							end
-						end
-					end
-					choke_point_proxies[neighbour_seg_id] = best_pos
-				end
-			end
-		end
-	end
-
-	return choke_points, choke_point_proxies, in_proxies, out_proxies
-end
-
-function NavigationManager:itr_prepare_streamline_data()
-	Iter:count_runtime(self, 'legacy_prepare')
-	if not self._visibility_groups or not self._room_doors or not self._rooms then
-		itr_log_nav_check(
-			'streamline-data-missing',
-			'missing legacy nav data; Iter proxy/choke data disabled for this nav field'
-		)
-		for _, segment in pairs(self._nav_segments) do
-			segment.choke_points = {}
-			segment.choke_point_proxies = {}
-			segment.in_proxies = {}
-			segment.out_proxies = {}
-		end
+	segment_id = itr_seg_id(all_nav_segments, segment_id)
+	neighbour_seg_id = itr_seg_id(all_nav_segments, neighbour_seg_id)
+	local destination = all_nav_segments[neighbour_seg_id]
+	if not destination or destination.disabled then
 		return
 	end
-
-	for segment_id, segment in pairs(self._nav_segments) do
-		segment.choke_points, segment.choke_point_proxies, segment.in_proxies, segment.out_proxies =
-			self:itr_find_proxies(segment_id)
+	local geo = self.itr_nav
+	if geo then
+		local links = geo.links[segment_id]
+		return links and links[neighbour_seg_id]
 	end
-
-	for segment_id, segment in pairs(self._nav_segments) do
-		for neighbour_seg_id in pairs(segment.neighbours or {}) do
-			local choke_point_proxy = segment.choke_point_proxies[neighbour_seg_id]
-			if choke_point_proxy then
-				local neighbour_choke_point_proxies = self._nav_segments[neighbour_seg_id].choke_point_proxies
-				if not neighbour_choke_point_proxies[segment_id] then
-					neighbour_choke_point_proxies[segment_id] = choke_point_proxy
-				end
-			end
-		end
-	end
+	local segment = all_nav_segments[segment_id]
+	return segment and segment.neighbours[neighbour_seg_id]
 end
 
-function NavigationManager:itr_copy_door_data()
-	Iter:count_runtime(self, 'legacy_prepare')
-	self.itr_room_doors = {}
-
-	for segment_id, segment in pairs(self._nav_segments) do
-		local segment_neighbours = self.itr_neighbour_doors and self.itr_neighbour_doors[segment_id]
-			or segment.neighbours
-		for _, door_list in pairs(segment_neighbours or {}) do
-			for _, door_id in pairs(door_list) do
-				if type(door_id) == 'number' and self._room_doors then
-					local data = self._room_doors[door_id]
-					if data then
-						local center = Vector3()
-						mvector3.lerp(center, data.pos, data.pos1, 0.5)
-						self.itr_room_doors[door_id] = { center, data.pos, data.pos1 }
-					end
-				end
-			end
-		end
-	end
-end
-
-local function itr_log_nav_prepare_summary(self)
-	local stats = self.itr_neighbour_door_stats or {}
-	itr_log_nav_check(
-		'prepare-summary',
-		('segments=%i rooms=%i room_doors=%i vis_groups=%i neighbour_pairs=%i mapped_doors=%i unmapped_vector_doors=%i passthrough_doors=%i'):format(
-			itr_count_table(self._nav_segments),
-			#(self._rooms or {}),
-			#(self._room_doors or {}),
-			#(self._visibility_groups or {}),
-			stats.pairs or 0,
-			stats.mapped or 0,
-			stats.unmapped or 0,
-			stats.passthrough or 0
-		)
-	)
-end
-
-local function itr_prepare_nav_field(self)
-	self.itr_coarse_cache = {}
-	if not itr_native_connections then
-		self:itr_restore_numeric_neighbour_doors()
-		self:itr_prepare_streamline_data()
-		self:itr_copy_door_data()
-		itr_log_nav_prepare_summary(self)
-	end
-
-	for navseg_id, segment in pairs(self._nav_segments) do
-		if itr_native_connections then
-			segment.choke_points = nil
-			segment.choke_point_proxies = nil
-			segment.in_proxies = nil
-			segment.out_proxies = nil
-		end
-		self:itr_make_neighbours_list(navseg_id)
-	end
-end
-
-if NavigationManager._send_nav_field_to_engine then
-	local itr_original_navigationmanager_resolvesegmentneighbours = NavigationManager._resolve_segment_neighbours
-	function NavigationManager:_resolve_segment_neighbours(...)
-		local result = itr_original_navigationmanager_resolvesegmentneighbours(self, ...)
-
-		itr_prepare_nav_field(self)
-
-		return result
-	end
-else
-	local itr_original_navigationmanager_sendnavfieldtoengine = NavigationManager.send_nav_field_to_engine
-	function NavigationManager:send_nav_field_to_engine(...)
-		itr_prepare_nav_field(self)
-
-		return itr_original_navigationmanager_sendnavfieldtoengine(self, ...)
-	end
+local function itr_navlink_usable(navlink, access_pos, access_neg)
+	return alive(navlink)
+		and not navlink:is_obstructed()
+		and (not access_pos or navlink:check_access(access_pos, access_neg or 0))
+		and itr_navlink_element(navlink)
 end
 
 local function itr_log_navlink_usage(self, navlink, t)
-	local key = navlink:key()
-	local navlink_usage = self.itr_navlink_planned_use[key]
+	local planned_use = self.itr_navlink_planned_use
+	if not planned_use then
+		planned_use = {}
+		self.itr_navlink_planned_use = planned_use
+	end
+	local link_key = navlink:key()
+	local navlink_usage = planned_use[link_key]
 	if not navlink_usage then
 		navlink_usage = {}
-		self.itr_navlink_planned_use[key] = navlink_usage
+		planned_use[link_key] = navlink_usage
 	end
 	local last_entry = navlink_usage[#navlink_usage]
 	if not last_entry or t > last_entry then -- 1 coarse path per frame, no need to stack multiple attempts from the same NPC
@@ -976,13 +327,14 @@ local function itr_log_navlink_usage(self, navlink, t)
 	end
 end
 
-local function itr_get_navlink_usage(self, navlink, t)
-	local n_key = navlink:key()
-	local navlink_usage = self.itr_navlink_planned_use[n_key]
-	if not navlink_usage then return 0 end
+local function itr_get_navlink_usage(self, navlink, element, t)
+	local navlink_usage = self.itr_navlink_planned_use and self.itr_navlink_planned_use[navlink:key()]
+	if not navlink_usage then
+		return 0
+	end
 
 	local nu = navlink_usage[1]
-	local threshold = t - self.itr_navlink_elements[n_key]._values.itr_interval
+	local threshold = t - (element._values.itr_interval or 0)
 	while nu and nu < threshold do
 		table_remove(navlink_usage, 1)
 		nu = navlink_usage[1]
@@ -990,8 +342,63 @@ local function itr_get_navlink_usage(self, navlink, t)
 	return #navlink_usage
 end
 
+local function itr_get_congestion_risk(self, navlink, element, t)
+	local nav_link_delay = element._values.itr_interval or 0
+	if nav_link_delay <= 0 then
+		return 0
+	end
+	local user = element.itr_reserved_by_unit
+	return math_max(0, navlink:delay_time() - t)
+		+ (
+				(alive(user) and user:id() ~= -1 and 0 or 1)
+				+ (element.itr_navlink_queue_length or 0)
+				+ itr_get_navlink_usage(self, navlink, element, t)
+			)
+			* nav_link_delay
+end
+
+local function itr_pos_obstructed(quad_field, pos)
+	local nav_tracker = quad_field:create_nav_tracker(pos, true)
+	local obstructed = nav_tracker:obstructed()
+	quad_field:destroy_nav_tracker(nav_tracker)
+	return obstructed
+end
+
+local function itr_get_free_door_point(self, geo, door_id)
+	local free = geo.free_points[door_id]
+	local points = geo.door_points[door_id]
+	if free == nil then
+		free = false
+		for i, door_pos in ipairs(points) do
+			if not itr_pos_obstructed(self._quad_field, door_pos) then
+				free = i
+				break
+			end
+		end
+		geo.free_points[door_id] = free
+	end
+	return free and points[free]
+end
+
+local function itr_static_door_pos(self, geo, i_door)
+	if type(i_door) == 'number' then
+		return geo and itr_get_free_door_point(self, geo, i_door) or nil
+	elseif i_door.x and not itr_pos_obstructed(self._quad_field, i_door) then
+		return i_door
+	end
+end
+
+local function itr_pair_open(self, geo, door_list)
+	for i = #door_list, 1, -1 do
+		if itr_static_door_pos(self, geo, door_list[i]) then
+			return true
+		end
+	end
+	return false
+end
+
 function NavigationManager:itr_get_closest_door_to_pos(
-	all_doors,
+	_,
 	door_list,
 	pos_from,
 	pos_to,
@@ -999,7 +406,10 @@ function NavigationManager:itr_get_closest_door_to_pos(
 	navlink_accounting,
 	access_neg
 )
-	if not door_list or not pos_to then return end
+	if not door_list or not pos_to then
+		return
+	end
+	local geo = self.itr_nav
 	local best_pos, best_pos_with_delay, t, min_congestion_risk
 	local best_dis = 1000000000
 	local is_direct, through_navlink, through_navlink_with_delay
@@ -1007,59 +417,34 @@ function NavigationManager:itr_get_closest_door_to_pos(
 	for i = #door_list, 1, -1 do
 		local i_door = door_list[i]
 		if type(i_door) == 'number' then
-			local door_positions = self.itr_room_doors and self.itr_room_doors[i_door]
-			if door_positions then
-				for _, door_pos in ipairs(door_positions) do
-					local nav_tracker = self._quad_field:create_nav_tracker(door_pos, true)
-					local obstructed = nav_tracker:obstructed()
-					self._quad_field:destroy_nav_tracker(nav_tracker)
-					if not obstructed then
-						local dis = (pos_from and mvec3_dis(pos_from, door_pos) or 0) + mvec3_dis(door_pos, pos_to)
-						if dis <= best_dis then
-							best_pos = door_pos
-							best_dis = dis
-							is_direct = true
-						end
-						break
-					end
+			local door_pos = geo and itr_get_free_door_point(self, geo, i_door)
+			if door_pos then
+				local dis = (pos_from and mvec3_dis(pos_from, door_pos) or 0) + mvec3_dis(door_pos, pos_to)
+				if dis <= best_dis then
+					best_pos = door_pos
+					best_dis = dis
+					is_direct = true
 				end
 			end
-
-		elseif i_door and i_door.x then
-			local dis = (pos_from and mvec3_dis(pos_from, i_door) or 0) + mvec3_dis(i_door, pos_to)
-			if dis <= best_dis then
-				best_pos = i_door
-				best_dis = dis
-				is_direct = true
+		elseif i_door.x then
+			-- r203: raw portals are probed too; only matched doors have cached probe points.
+			if not itr_pos_obstructed(self._quad_field, i_door) then
+				local dis = (pos_from and mvec3_dis(pos_from, i_door) or 0) + mvec3_dis(i_door, pos_to)
+				if dis <= best_dis then
+					best_pos = i_door
+					best_dis = dis
+					is_direct = true
+				end
 			end
-
-		elseif
-			not is_direct
-			and alive(i_door)
-			and not i_door:is_obstructed()
-			and i_door:check_access(access_pos, access_neg)
-			and self.itr_navlink_elements
-			and self.itr_navlink_elements[i_door:key()]
-		then
-			local element = self.itr_navlink_elements[i_door:key()]
+		elseif not is_direct and itr_navlink_usable(i_door, access_pos, access_neg) then
+			local element = itr_navlink_element(i_door)
 			local start_pos = element:value('position')
 			local end_pos = element:nav_link_end_pos()
 			local dis = (pos_from and mvec3_dis(pos_from, start_pos) or 0)
 				+ mvec3_dis(start_pos, end_pos)
 				+ mvec3_dis(end_pos, pos_to)
-			local nav_link_delay = element._values.itr_interval
-			local congestion_risk = 0
-			if nav_link_delay > 0 then
-				t = t or TimerManager:game():time()
-				local user = element.itr_reserved_by_unit
-				congestion_risk = math_max(0, i_door:delay_time() - t)
-					+ (
-							(alive(user) and user:id() ~= -1 and 0 or 1)
-							+ (element.itr_navlink_queue_length or 0)
-							+ itr_get_navlink_usage(self, i_door, t)
-						)
-						* nav_link_delay
-			end
+			t = t or TimerManager:game():time()
+			local congestion_risk = itr_get_congestion_risk(self, i_door, element, t)
 			if congestion_risk == 0 then
 				if dis * 1.4 < best_dis then
 					is_direct = false
@@ -1090,15 +475,7 @@ end
 function NavigationManager:itr_get_door_between(segment1_id, segment2_id, near_pos, access_pos, access_neg)
 	local door_list = self:itr_get_neighbour_door_list(segment1_id, segment2_id)
 	if door_list then
-		return self:itr_get_closest_door_to_pos(
-			self._room_doors,
-			door_list,
-			nil,
-			near_pos,
-			access_pos,
-			true,
-			access_neg
-		)
+		return self:itr_get_closest_door_to_pos(nil, door_list, nil, near_pos, access_pos, true, access_neg)
 	end
 end
 
@@ -1111,30 +488,25 @@ function NavigationManager:itr_find_best_navlink(
 	access_neg
 )
 	local door_list = self:itr_get_neighbour_door_list(segment1_id, segment2_id)
-	if not door_list then return end
+	if not door_list then
+		return
+	end
 
 	local best_time_to_wait = 100000000000
 	local best_navlink, best_navlink_element
 	for i = #door_list, 1, -1 do
 		local navlink = door_list[i]
-		if
-			type(navlink) ~= 'number'
-			and navlink
-			and not navlink.x
-			and alive(navlink)
-			and not navlink:is_obstructed()
-			and navlink:check_access(access_pos, access_neg)
-			and self.itr_navlink_elements
-			and self.itr_navlink_elements[navlink:key()]
-		then
-			local navlink_element = self.itr_navlink_elements[navlink:key()]
+		if type(navlink) ~= 'number' and not navlink.x and itr_navlink_usable(navlink, access_pos, access_neg) then
+			local navlink_element = itr_navlink_element(navlink)
 
-			local interval = navlink_element._values.itr_interval
+			local interval = navlink_element._values.itr_interval or 0
 			local extra_time_to_go = math_max(0, 1.5 - interval)
 			local navpos = navlink_element:value('position')
 
 			local queue_length = navlink_element.itr_navlink_queue_length or 0
-			if navlink_element == current_navlink_element then queue_length = queue_length - 1 end
+			if navlink_element == current_navlink_element then
+				queue_length = queue_length - 1
+			end
 
 			local time_to_wait = queue_length * (interval + extra_time_to_go)
 
@@ -1161,28 +533,137 @@ function NavigationManager:itr_find_best_navlink(
 	return best_navlink, best_navlink_element
 end
 
+-- Congestion cost of crossing a pair: 0 with a walkable static entry, nil when no entry is usable. Native delay
+-- is a hard gate only for searches that ignore congestion; congestion-aware searches price Iter's own queue delay.
+local function itr_get_accessibility(self, door_list, access_pos, access_neg, honor_delay)
+	if not door_list then
+		return
+	end
+	local best_cost, t
+	for i = #door_list, 1, -1 do
+		local i_door = door_list[i]
+		if type(i_door) == 'number' or i_door.x then
+			if itr_static_door_pos(self, self.itr_nav, i_door) then
+				return 0
+			end
+		elseif itr_navlink_usable(i_door, access_pos, access_neg) then
+			t = t or TimerManager:game():time()
+			if not honor_delay or t > i_door:delay_time() then
+				local element = itr_navlink_element(i_door)
+				local cost = itr_get_congestion_risk(self, i_door, element, t)
+				if cost == 0 then
+					cost = (element._values.itr_interval or 0) > 0 and 0.1 or 0.01
+				end
+				if not best_cost or cost < best_cost then
+					best_cost = cost
+				end
+			end
+		end
+	end
+	return best_cost
+end
+
+function NavigationManager:itr_get_accessibility(door_list, access_pos, access_neg)
+	return itr_get_accessibility(self, door_list, access_pos, access_neg, false)
+end
+
+NavigationManager.itr_navlink_coef = 350
+
+if not Iter.settings.streamline_path then
+	return
+end
+
+local itr_original_navigationmanager_setloaddata = NavigationManager.set_load_data
+function NavigationManager:set_load_data(...)
+	if not next(self._nav_segments) then
+		itr_reset_navigation(self)
+	end
+	return itr_original_navigationmanager_setloaddata(self, ...)
+end
+
+-- Captures the converted v6 navfield the engine receives; v5 assets arrive here through the native converter.
+local itr_original_navigationmanager_sendnavfieldtoengine = NavigationManager._send_nav_field_to_engine
+function NavigationManager:_send_nav_field_to_engine(load_data, ...)
+	local result = itr_original_navigationmanager_sendnavfieldtoengine(self, load_data, ...)
+	if load_data and load_data.segments and not self.itr_nav_failed then
+		local geo = self.itr_nav or Geometry.new()
+		local ok, err = pcall(geo.capture, geo, load_data, self._grid_size)
+		if ok then
+			self.itr_nav = geo
+		else
+			self.itr_nav = nil
+			self.itr_nav_failed = true
+			log('[Iter] navigation geometry disabled for this level: ' .. tostring(err))
+		end
+	end
+	return result
+end
+
+local function itr_reconcile_live_graph(self, geo)
+	local started = os.clock()
+	geo:clear_links()
+	local all_nav_segments = self._nav_segments
+	local level_id = Iter:get_level_id()
+	geo.blocked = ENTRANCE_LEVELS[level_id]
+		and Iter.settings['map_change_' .. level_id]
+		and all_nav_segments['13']
+		and all_nav_segments['1']
+		and function(from, to, portal)
+			return itr_gallery_entrance_blocked(self, from, to, portal)
+		end
+	local matched, links = 0, 0
+	for segment_id, segment in pairs(all_nav_segments) do
+		geo:ensure_segment(segment_id)
+		for neighbour_seg_id, entries in pairs(segment.neighbours) do
+			geo:set_pair(segment_id, neighbour_seg_id, entries)
+			matched = matched + #(geo._nav_segments[segment_id].neighbours[neighbour_seg_id] or EMPTY)
+			links = links + #(geo.links[segment_id][neighbour_seg_id] or EMPTY)
+		end
+	end
+	geo:prepare_all()
+	for segment_id in pairs(all_nav_segments) do
+		self:itr_make_neighbours_list(segment_id)
+	end
+	self.itr_coarse_cache = {}
+	log(
+		('[Iter] navigation geometry: rooms=%d doors=%d matched=%d ambiguous=%d unmatched=%d other_entries=%d ms=%.1f'):format(
+			#geo._rooms,
+			#geo._room_doors,
+			matched,
+			geo.ambiguous,
+			geo.unmatched,
+			links - matched - geo.ambiguous - geo.unmatched,
+			(os.clock() - started) * 1000
+		)
+	)
+end
+
+local itr_original_navigationmanager_resolvesegmentneighbours = NavigationManager._resolve_segment_neighbours
+function NavigationManager:_resolve_segment_neighbours(...)
+	local result = itr_original_navigationmanager_resolvesegmentneighbours(self, ...)
+	local geo = self.itr_nav
+	if geo then
+		local ok, err = pcall(itr_reconcile_live_graph, self, geo)
+		if not ok then
+			self.itr_nav = nil
+			self.itr_nav_failed = true
+			log('[Iter] navigation geometry disabled for this level: ' .. tostring(err))
+		end
+	end
+	return result
+end
+
 local axis = Vector3()
-local function itr_get_door_in_alignment(all_doors, door_list, from, to)
-	if not from or not to then return end
+local function itr_get_door_in_alignment(self, geo, door_list, from, to)
+	if not from or not to then
+		return
+	end
 	local best_pos, best_angle
 	mvec3_set(axis, to)
 	mvec3_sub(axis, from)
 	for i = #door_list, 1, -1 do
-		local i_door = door_list[i]
-		if type(i_door) == 'number' and all_doors then
-			local door = all_doors[i_door]
-			local door_pos = door and (door.center or door[1])
-			if door_pos then
-				mvec3_set(tmp_vec1, door_pos)
-				mvec3_sub(tmp_vec1, from)
-				local angle = mvec3_ang(axis, tmp_vec1)
-				if not best_angle or angle < best_angle then
-					best_angle = angle
-					best_pos = door_pos
-				end
-			end
-		elseif i_door and i_door.x then
-			local door_pos = i_door
+		local door_pos = itr_static_door_pos(self, geo, door_list[i])
+		if door_pos then
 			mvec3_set(tmp_vec1, door_pos)
 			mvec3_sub(tmp_vec1, from)
 			local angle = mvec3_ang(axis, tmp_vec1)
@@ -1195,58 +676,76 @@ local function itr_get_door_in_alignment(all_doors, door_list, from, to)
 	return best_pos
 end
 
-function NavigationManager:itr_get_coarse_pos_between(segment1_id, segment2_id, near_pos, access_pos, access_neg)
-	local doors = self:itr_get_neighbour_door_list(segment1_id, segment2_id)
-	if not doors then return false end
-	if itr_native_connections then
-		return self:itr_get_closest_door_to_pos(nil, doors, nil, near_pos, access_pos, false, access_neg)
-	end
-
-	local segment1 = self._nav_segments[segment1_id]
-	local best_pos = segment1.choke_point_proxies and segment1.choke_point_proxies[segment2_id]
-	if best_pos then return best_pos end
-
-	best_pos = segment1.out_proxies and segment1.out_proxies[segment2_id]
-	if best_pos then return best_pos end
-
-	best_pos = segment1.in_proxies and segment1.in_proxies[segment2_id]
-	if best_pos then return best_pos end
-
-	return self:itr_get_closest_door_to_pos(self._room_doors, doors, nil, near_pos, access_pos, false, access_neg)
+local function itr_get_hints(geo, segment_id, neighbour_seg_id)
+	local hints = geo and geo._nav_segments[segment_id]
+	return hints and hints.neighbours[neighbour_seg_id] and hints
 end
 
+function NavigationManager:itr_get_coarse_pos_between(segment1_id, segment2_id, near_pos, access_pos, access_neg)
+	local doors = self:itr_get_neighbour_door_list(segment1_id, segment2_id)
+	if not doors then
+		return false
+	end
+
+	local geo = self.itr_nav
+	local hints = itr_get_hints(geo, segment1_id, segment2_id)
+	if hints and itr_pair_open(self, geo, doors) then
+		local best_pos = hints.choke_point_proxies[segment2_id]
+			or hints.out_proxies[segment2_id]
+			or hints.in_proxies[segment2_id]
+		if best_pos then
+			return best_pos
+		end
+	end
+
+	return self:itr_get_closest_door_to_pos(nil, doors, nil, near_pos, access_pos, false, access_neg)
+end
+
+function NavigationManager:itr_path_has_navlinks(path)
+	local geo = self.itr_nav
+	for i = 1, #path - 1 do
+		local door_list = self:itr_get_neighbour_door_list(path[i][1], path[i + 1][1])
+		if door_list and not itr_pair_open(self, geo, door_list) then
+			return true
+		end
+	end
+	return false
+end
+
+-- Without geometry (capture failed) native portal lists are streamlined by alignment alone, like r203.
 function NavigationManager:itr_streamline(path, access_pos, access_neg)
-	Iter:count_runtime(self, 'streamline')
+	local geo = self.itr_nav
 	access_neg = access_neg or path.itr_access_neg
 	local all_segs = self._nav_segments
-	local all_doors = self.itr_room_doors or self._room_doors
+	local hint_segs = geo and geo._nav_segments or EMPTY
 	local path_nr = #path
 	local step1 = path[1]
 	local step2
 
-	if not all_segs or not step1 then return false end
+	if not step1 then
+		return false
+	end
 	for _, step in ipairs(path) do
-		step[1] = itr_resolve_nav_seg_id(all_segs, step[1])
+		step[1] = itr_seg_id(all_segs, step[1])
 	end
 
 	local segment1 = all_segs[step1[1]]
+	if not segment1 then
+		return false
+	end
 
-	if not segment1 then return false end
-
-	if not step1[2] then step1[2] = segment1.pos end
+	if not step1[2] then
+		step1[2] = segment1.pos
+	end
 
 	for i = 2, path_nr do
 		step2 = path[i]
-
-		segment1 = all_segs[step1[1]]
 		local segment2_id = step2[1]
 		local segment2 = all_segs[segment2_id]
 
 		if
-			not segment1
-			or not segment2
+			not segment2
 			or segment2.disabled
-			or not segment1.neighbours
 			or access_pos and self._quad_field:is_nav_segment_blocked(segment2_id, access_pos)
 		then
 			return false
@@ -1257,44 +756,41 @@ function NavigationManager:itr_streamline(path, access_pos, access_neg)
 			local navlink
 			local step3 = path[i + 1]
 			local segment3 = step3 and all_segs[step3[1]]
+			local hints1 = itr_get_hints(geo, step1[1], segment2_id)
+			local hints2 = hint_segs[segment2_id] or EMPTY
+			local hints3 = step3 and hint_segs[step3[1]] or EMPTY
 
-			local best_pos = not itr_native_connections
-				and segment1.choke_point_proxies
-				and segment1.choke_point_proxies[step2[1]]
-
-			if itr_native_connections then
-				best_pos = itr_get_door_in_alignment(nil, door_list, step1[2], segment3 and segment3.pos)
-			elseif not best_pos then
-				local out_proxy = step3
-					and (
-						(segment3 and segment3.choke_points and segment3.choke_points[step2[1]])
-						or (segment2.out_proxies and segment2.out_proxies[step3[1]])
-					)
-				local in_proxy = segment2.in_proxies and segment2.in_proxies[step1[1]] or segment3 and segment3.pos
-				best_pos = itr_get_door_in_alignment(all_doors, door_list, step1[2], out_proxy or in_proxy)
+			local best_pos = hints1 and hints1.choke_point_proxies[segment2_id]
+			if best_pos and not itr_pair_open(self, geo, door_list) then
+				best_pos = nil
 			end
 
 			if not best_pos then
-				local proxy = not itr_native_connections
-						and step3
-						and segment2.in_proxies
-						and segment2.in_proxies[step3[1]]
+				local out_proxy = step3
+					and (
+						hints3.choke_points and hints3.choke_points[segment2_id]
+						or hints2.out_proxies and hints2.out_proxies[step3[1]]
+					)
+				local in_proxy = hints2.in_proxies and hints2.in_proxies[step1[1]] or segment3 and segment3.pos
+				best_pos = itr_get_door_in_alignment(self, geo, door_list, step1[2], out_proxy or in_proxy)
+			end
+
+			if not best_pos then
+				local proxy = step3 and hints2.in_proxies and hints2.in_proxies[step3[1]]
 					or path[path_nr][2]
 					or segment2.pos
-				best_pos, navlink = self:itr_get_closest_door_to_pos(
-					all_doors,
-					door_list,
-					step1[2],
-					proxy,
-					access_pos,
-					true,
-					access_neg
-				)
-				if not best_pos then return false end
+				best_pos, navlink =
+					self:itr_get_closest_door_to_pos(nil, door_list, step1[2], proxy, access_pos, true, access_neg)
+				if not best_pos then
+					return false
+				end
 			end
 
 			step2[2] = best_pos
 			step2[3] = navlink
+			if navlink then
+				path.has_navlinks = true -- callers must not treat a chosen link crossing as walkable
+			end
 		elseif step1[1] ~= segment2_id then
 			return false
 		end
@@ -1310,56 +806,27 @@ function NavigationManager:itr_streamline(path, access_pos, access_neg)
 	return path
 end
 
-function NavigationManager:itr_get_accessibility(door_list, access_pos, access_neg)
-	if not door_list then return end
-	local min_congestion_risk, t
-	for i = #door_list, 1, -1 do
-		local i_door = door_list[i]
-		if type(i_door) == 'number' or i_door and i_door.x then
-			return 0
-		elseif
-			alive(i_door)
-			and not i_door:is_obstructed()
-			and i_door:check_access(access_pos, access_neg)
-			and self.itr_navlink_elements
-			and self.itr_navlink_elements[i_door:key()]
-		then
-			t = t or TimerManager:game():time()
-			local element = self.itr_navlink_elements[i_door:key()]
-			local nav_link_delay = element._values.itr_interval
-			if nav_link_delay > 0 then
-				local user = element.itr_reserved_by_unit
-				local congestion_risk = math_max(0, i_door:delay_time() - t)
-					+ (
-							(alive(user) and user:id() ~= -1 and 0 or 1)
-							+ (element.itr_navlink_queue_length or 0)
-							+ itr_get_navlink_usage(self, i_door, t)
-						)
-						* nav_link_delay
-				if congestion_risk == 0 then
-					return 0.1
-				elseif not min_congestion_risk or congestion_risk < min_congestion_risk then
-					min_congestion_risk = congestion_risk
-				end
-			else
-				return 0.01
-			end
-		end
-	end
-	return min_congestion_risk
-end
-
 local function path_copy(path)
 	local result =
 		{ has_navlinks = path.has_navlinks, coarse_dis = path.coarse_dis, itr_access_neg = path.itr_access_neg }
 	for i = 1, #path do
 		local step_src = path[i]
-		local step_dst = {
-			step_src[1],
-			step_src[2],
-		}
-		table_insert(result, step_dst)
+		table_insert(result, { step_src[1], step_src[2] })
 	end
+	return result
+end
+
+local function shallow_copy(t)
+	local result = {}
+	for k, v in pairs(t) do
+		result[k] = v
+	end
+	return result
+end
+
+local function append(list, value)
+	local result = { unpack(list) }
+	result[#result + 1] = value
 	return result
 end
 
@@ -1372,52 +839,41 @@ local function get_coarse_dis(p1, p2, ps)
 	return dis
 end
 
-NavigationManager.itr_navlink_coef = 350
+-- Cache nodes keyed by the exact native values: masks and segment ids are never stringified or joined.
+local NIL_KEY = {}
+local function cache_node(node, value)
+	if value == nil then
+		value = NIL_KEY
+	end
+	local child = node[value]
+	if not child then
+		child = {}
+		node[value] = child
+	end
+	return child
+end
+
 NavigationManager.itr_coarse_cache_lifetime = 2
 NavigationManager.itr_coarse_fail_retry_t = 3
 
+-- The native method name is misspelled (coarce); search_coarse and _commence_coarce_searches dispatch here.
 local itr_original_navigationmanager_executecoarcesearch = NavigationManager._execute_coarce_search
+assert(itr_original_navigationmanager_executecoarcesearch, 'Iter: native _execute_coarce_search missing')
 function NavigationManager:_execute_coarce_search(search_data)
-	Iter:count_runtime(self, 'coarse')
-	self:itr_refresh_gallery_entrance()
-	if not self._nav_segments and itr_original_navigationmanager_executecoarcesearch then
-		Iter:count_runtime(self, 'fallback')
-		itr_log_nav_check(
-			'VANILLA-FALLBACK-coarse-missing-data',
-			('VANILLA FALLBACK: missing nav segments for search id=%s start=%s end=%s'):format(
-				tostring(search_data.id),
-				tostring(search_data.start_i_seg),
-				tostring(search_data.end_i_seg)
-			)
-		)
+	local geo = self.itr_nav
+	local all_nav_segments = self._nav_segments
+	local next_seg_id = search_data.start_i_seg
+	local end_i_seg = search_data.end_i_seg
+	if not geo or not all_nav_segments[next_seg_id] or not all_nav_segments[end_i_seg] then
 		return itr_original_navigationmanager_executecoarcesearch(self, search_data)
 	end
+
+	itr_refresh_gallery_entrance(self)
 
 	local t = TimerManager:game():time()
 	local access_pos = search_data.access_pos
 	local access_neg = search_data.access_neg
-	self.itr_coarse_cache = self.itr_coarse_cache or {}
-	local all_nav_segments = self._nav_segments
-	local next_seg_id = itr_resolve_nav_seg_id(all_nav_segments, search_data.start_i_seg)
-	local end_i_seg = itr_resolve_nav_seg_id(all_nav_segments, search_data.end_i_seg)
 	local verify_clbk = search_data.verify_clbk
-
-	if not all_nav_segments[next_seg_id] or not all_nav_segments[end_i_seg] then
-		Iter:count_runtime(self, 'fallback')
-		itr_log_nav_check(
-			'VANILLA-FALLBACK-coarse-unresolved-segment',
-			('VANILLA FALLBACK: unresolved segment id for search id=%s start=%s->%s end=%s->%s'):format(
-				tostring(search_data.id),
-				tostring(search_data.start_i_seg),
-				tostring(next_seg_id),
-				tostring(search_data.end_i_seg),
-				tostring(end_i_seg)
-			)
-		)
-		return itr_original_navigationmanager_executecoarcesearch
-				and itr_original_navigationmanager_executecoarcesearch(self, search_data)
-			or false
-	end
 
 	local bypass_congestion = search_data.bypass_congestion
 	if not bypass_congestion then
@@ -1429,40 +885,45 @@ function NavigationManager:_execute_coarce_search(search_data)
 		end
 	end
 
-	local path_key = tostring(access_pos) .. ';' .. tostring(access_neg) .. ';' .. next_seg_id .. ';' .. end_i_seg
+	local coarse_cache = self.itr_coarse_cache
+	if not coarse_cache then
+		coarse_cache = {}
+		self.itr_coarse_cache = coarse_cache
+	end
 	local use_cache = not bypass_congestion and not verify_clbk
+	local cache_ends = use_cache
+		and cache_node(cache_node(cache_node(coarse_cache, access_pos), access_neg), next_seg_id)
 
-	local cached_result = use_cache and self.itr_coarse_cache[path_key]
-	if not cached_result then
-		-- qued
-	elseif type(cached_result) == 'number' then
-		local fail_t = cached_result
-		if t - fail_t < self.itr_coarse_fail_retry_t then return false end
-	else
-		if t - cached_result.t < self.itr_coarse_cache_lifetime then
-			local result = path_copy(cached_result)
-			result.t = nil
-			result[#result][2] = search_data.to_pos
-			return search_data.results_callback and result or self:itr_streamline(result, access_pos, access_neg)
+	local cached_result = use_cache and cache_ends[end_i_seg]
+	if type(cached_result) == 'number' then
+		if t - cached_result < self.itr_coarse_fail_retry_t then
+			return false
 		end
+	elseif cached_result and t - cached_result.t < self.itr_coarse_cache_lifetime then
+		local result = path_copy(cached_result)
+		result[#result][2] = search_data.to_pos
+		return search_data.results_callback and result or self:itr_streamline(result, access_pos, access_neg)
 	end
 
 	if
 		all_nav_segments[end_i_seg].disabled
-		or verify_clbk and not verify_clbk(end_i_seg)
 		or access_pos and self._quad_field:is_nav_segment_blocked(end_i_seg, access_pos)
 	then
-		if use_cache then self.itr_coarse_cache[path_key] = t end
+		if use_cache then
+			cache_ends[end_i_seg] = t
+		end
 		return false
 	end
 
 	local navlink_coef = self.itr_navlink_coef
+	local links = geo.links
+	local enabled = geo.enabled
 
 	local potential_paths = {}
 	local seg_to_search = {}
 	local discovered_seg = {
 		[next_seg_id] = {
-			path = tostring(next_seg_id),
+			path = { next_seg_id },
 			delay = 0,
 			steps_nr = 0,
 			coarse_dis = 0,
@@ -1473,20 +934,22 @@ function NavigationManager:_execute_coarce_search(search_data)
 	local candidate
 	repeat
 		local navseg = all_nav_segments[next_seg_id]
-		local neighbours = navseg.neighbours
+		local neighbours = links[next_seg_id]
 		if neighbours then
 			local consider_neighbours = true
 			local from = discovered_seg[next_seg_id]
-			local door_list = self:itr_get_neighbour_door_list(next_seg_id, end_i_seg)
+			local door_list = neighbours[end_i_seg]
 			if door_list then
-				local access_cost = self:itr_get_accessibility(door_list, access_pos, access_neg)
+				local access_cost = itr_get_accessibility(self, door_list, access_pos, access_neg, bypass_congestion)
 				if access_cost then
-					if bypass_congestion then access_cost = 0 end
+					if bypass_congestion then
+						access_cost = 0
+					end
 					local through_pos =
 						self:itr_get_coarse_pos_between(next_seg_id, end_i_seg, from.pos, access_pos, access_neg)
 					consider_neighbours = access_cost > 0 or not through_pos
 					if through_pos then
-						local tmp = table.map_copy(from)
+						local tmp = shallow_copy(from)
 						tmp.delay = tmp.delay + access_cost
 						tmp.coarse_dis = tmp.coarse_dis
 							+ get_coarse_dis(tmp.pos, through_pos, navseg.pos)
@@ -1494,25 +957,33 @@ function NavigationManager:_execute_coarce_search(search_data)
 						table_insert(potential_paths, tmp)
 
 						if not candidate or tmp.coarse_dis < candidate.coarse_dis then
-							if tmp.delay < 0.2 then candidate = tmp end
+							if tmp.delay < 0.2 then
+								candidate = tmp
+							end
 						end
 					end
 				end
 			end
 
 			if consider_neighbours then
-				local enabled_neighbours = navseg.itr_enabled_neighbours_i or {}
+				local enabled_neighbours = enabled[next_seg_id] or EMPTY
 				for i = #enabled_neighbours, 1, -1 do
 					local neighbour_seg_id = enabled_neighbours[i]
-					if verify_clbk and not verify_clbk(neighbour_seg_id) then
-						-- qued
-					elseif access_pos and self._quad_field:is_nav_segment_blocked(neighbour_seg_id, access_pos) then
-						-- qued
-					else
-						local door_list = self:itr_get_neighbour_door_list(next_seg_id, neighbour_seg_id)
-						local access_cost = self:itr_get_accessibility(door_list, access_pos, access_neg)
+					if
+						not (verify_clbk and not verify_clbk(neighbour_seg_id))
+						and not (access_pos and self._quad_field:is_nav_segment_blocked(neighbour_seg_id, access_pos))
+					then
+						local access_cost = itr_get_accessibility(
+							self,
+							neighbours[neighbour_seg_id],
+							access_pos,
+							access_neg,
+							bypass_congestion
+						)
 						if access_cost then
-							if bypass_congestion then access_cost = 0 end
+							if bypass_congestion then
+								access_cost = 0
+							end
 							local through_pos = self:itr_get_coarse_pos_between(
 								next_seg_id,
 								neighbour_seg_id,
@@ -1532,7 +1003,7 @@ function NavigationManager:_execute_coarce_search(search_data)
 									then
 										table_insert(seg_to_search, neighbour_seg_id)
 										discovered = {
-											path = from.path .. ';' .. neighbour_seg_id,
+											path = append(from.path, neighbour_seg_id),
 											delay = delay,
 											steps_nr = from.steps_nr + 1,
 											coarse_dis = coarse_dis,
@@ -1540,18 +1011,16 @@ function NavigationManager:_execute_coarce_search(search_data)
 										}
 										discovered_seg[neighbour_seg_id] = discovered
 									end
-								else
-									if
-										coarse_dis + delay * navlink_coef
-										< discovered.coarse_dis + discovered.delay * navlink_coef
-									then
-										table_insert(seg_to_search, neighbour_seg_id)
-										discovered.path = from.path .. ';' .. neighbour_seg_id
-										discovered.delay = delay
-										discovered.steps_nr = from.steps_nr + 1
-										discovered.coarse_dis = coarse_dis
-										discovered.pos = through_pos
-									end
+								elseif
+									coarse_dis + delay * navlink_coef
+									< discovered.coarse_dis + discovered.delay * navlink_coef
+								then
+									table_insert(seg_to_search, neighbour_seg_id)
+									discovered.path = append(from.path, neighbour_seg_id)
+									discovered.delay = delay
+									discovered.steps_nr = from.steps_nr + 1
+									discovered.coarse_dis = coarse_dis
+									discovered.pos = through_pos
 								end
 							end
 						end
@@ -1574,29 +1043,29 @@ function NavigationManager:_execute_coarce_search(search_data)
 	end
 
 	if not best_path then
-		if use_cache then self.itr_coarse_cache[path_key] = t end
+		if use_cache then
+			cache_ends[end_i_seg] = t
+		end
 		return false
 	end
 
-	local i = 1
 	local result = {}
-	for idseg in string.gmatch(best_path.path, '[^;]+') do
-		local navseg_id = itr_resolve_nav_seg_id(all_nav_segments, idseg)
-		result[i] = { navseg_id }
-		i = i + 1
+	for i, seg_id in ipairs(best_path.path) do
+		result[i] = { seg_id }
 	end
-	result[i] = {
+	result[#result + 1] = {
 		end_i_seg,
 		search_data.to_pos,
 	}
-	result.has_navlinks = best_path.delay > 0
+	-- From the chosen pairs, not delay: bypass searches price every usable link at 0.
+	result.has_navlinks = self:itr_path_has_navlinks(result)
 	result.coarse_dis = best_path.coarse_dis
 	result.itr_access_neg = access_neg
 
 	if use_cache and best_path.delay == 0 then
 		local cache_result = path_copy(result)
 		cache_result.t = t
-		self.itr_coarse_cache[path_key] = cache_result
+		cache_ends[end_i_seg] = cache_result
 	end
 
 	return search_data.results_callback and result or self:itr_streamline(result, access_pos, access_neg)

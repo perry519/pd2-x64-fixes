@@ -128,7 +128,7 @@ function CoroutineManager:remove_coroutine(name)
 
 	local priority, rank = self:fs_find(name)
 	if priority then
-		local co_data = table.remove(self._coroutines[priority][rank])
+		local co_data = table.remove(self._coroutines[priority], rank)
 		if co_data then
 			local rem_func = co_data.force_rem_func
 			if rem_func then

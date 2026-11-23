@@ -9,6 +9,7 @@ local mvec3_z = mvector3.z
 local seg2vg
 local add_segment
 local append_room
+local append_door
 local transfer_room
 local append_vis_group
 local level_id = Iter:get_level_id()
@@ -133,28 +134,29 @@ elseif level_id == 'born' then
 
 elseif level_id == 'branchbank' then
 
+	-- x64 asset renumbered the r200 targets: rooms -81, door 999 -> 863; see nav_data_contracts
 	function NavigationManager:set_load_data(data)
 		-- prevent chars to walk into wall
-		local rid = 551
+		local rid = 470
 		data.room_borders_y_pos[rid] = 41
-		local did = 999
+		local did = 863
 		mvector3.set_y(data.door_high_pos[did], 41)
 
 		-- Parking, grid side
 		rid = append_room(-129, -130, 76, 53, 22.5, 22.5, 22.5, 22.5, 17)
-		append_door(Vector3(-130, 76, 22.5), Vector3(-129, 76, 22.5), 504, rid)
-		did = append_door(Vector3(-130, 53, 22.5), Vector3(-129, 53, 22.5), 553, rid)
+		append_door(Vector3(-130, 76, 22.5), Vector3(-129, 76, 22.5), 423, rid)
+		did = append_door(Vector3(-130, 53, 22.5), Vector3(-129, 53, 22.5), 472, rid)
 
 		table.insert(data.nav_segments[17].neighbours[18], did)
 		table.insert(data.nav_segments[18].neighbours[17], did)
 
-		data.room_borders_x_pos[508] = -130
-		append_door(Vector3(-130, 66, 22.5), Vector3(-130, 67, 22.5), 508, rid)
+		data.room_borders_x_pos[427] = -130
+		append_door(Vector3(-130, 66, 22.5), Vector3(-130, 67, 22.5), 427, rid)
 
 		-- Parking, other side
 		rid = append_room(-110, -124, 114, 113, 22.5, 22.5, 22.5, 22.5, 15)
-		append_door(Vector3(-110, 113, 22.5), Vector3(-110, 114, 22.5), 375, rid)
-		append_door(Vector3(-124, 113, 22.5), Vector3(-124, 114, 22.5), 414, rid)
+		append_door(Vector3(-110, 113, 22.5), Vector3(-110, 114, 22.5), 294, rid)
+		append_door(Vector3(-124, 113, 22.5), Vector3(-124, 114, 22.5), 333, rid)
 
 		itr_original_navigationmanager_setloaddata(self, data)
 	end
@@ -215,23 +217,17 @@ elseif level_id == 'escape_park' then
 
 	function NavigationManager:set_load_data(data)
 		local pos_match = function(pos)
-			x = mvec3_x(low_pos)
-			y = mvec3_y(low_pos)
-			if x >= -57 and x <= 84 and y >= -99 and y <= -21 then
-				z = mvec3_z(low_pos)
-				if z < -150 then
-					return true
-				end
-			end
-			return false
+			local x = mvec3_x(pos)
+			local y = mvec3_y(pos)
+			return x >= -57 and x <= 84 and y >= -99 and y <= -21 and mvec3_z(pos) < -150
 		end
 
 		local delta_i = 1000000
 		local delta = Vector3(delta_i, 0, 0)
 
 		for did = #data.door_low_pos, 1, -1 do
-			low_pos = data.door_low_pos[did]
-			high_pos = data.door_high_pos[did]
+			local low_pos = data.door_low_pos[did]
+			local high_pos = data.door_high_pos[did]
 			if pos_match(low_pos) and pos_match(high_pos) then
 				mvec3_add(low_pos, delta)
 				mvec3_add(high_pos, delta)
@@ -280,12 +276,13 @@ elseif level_id == 'escape_street' then
 
 elseif level_id == 'firestarter_1' then
 
+	-- x64 asset renumbered the r200 targets: rooms 576 -> 572, 1124 -> 1120; see nav_data_contracts
 	function NavigationManager:set_load_data(data)
 		-- access around a truck
-		data.room_borders_x_pos[576] = -12
-		data.room_borders_y_neg[576] = 159
+		data.room_borders_x_pos[572] = -12
+		data.room_borders_y_neg[572] = 159
 
-		local did = append_door(Vector3(-13, 159, 21.98), Vector3(-12, 159, 21.98), 576, 1124)
+		local did = append_door(Vector3(-13, 159, 21.98), Vector3(-12, 159, 21.98), 572, 1120)
 		table.insert(data.nav_segments[29].neighbours[52], did)
 		table.insert(data.nav_segments[52].neighbours[29], did)
 
@@ -307,10 +304,6 @@ elseif level_id == 'flat' then
 
 		itr_original_navigationmanager_addobstacle(self, obstacle_unit, ...)
 	end
-
-elseif level_id == 'gallery' or level_id == 'framing_frame_1' then
-	-- Keep native shutter links reachable; the old segment-100 room split is obsolete.
-	return
 
 elseif level_id == 'jewelry_store' then
 
@@ -408,21 +401,22 @@ elseif level_id == 'kosugi' then
 
 elseif level_id == 'mex' then
 
+	-- x64 asset renumbered the r200 targets: rooms -25, doors -46; see nav_data_contracts
 	function NavigationManager:set_load_data(data)
-		transfer_room(3908, 235, 192)
-		transfer_room(3916, 235, 192)
-		transfer_room(3907, 235, 192)
-		transfer_room(3896, 235, 192)
-		transfer_room(3906, 235, 192)
-		transfer_room(3899, 235, 192)
-		transfer_room(3889, 235, 192)
-		transfer_room(3898, 235, 192)
-		data.nav_segments[235].neighbours[192] = { 6866, 6867, 6868, 6833, 6834, 6835 }
-		data.nav_segments[192].neighbours[235] = { 6866, 6867, 6868, 6833, 6834, 6835 }
+		transfer_room(3883, 235, 192)
+		transfer_room(3891, 235, 192)
+		transfer_room(3882, 235, 192)
+		transfer_room(3871, 235, 192)
+		transfer_room(3881, 235, 192)
+		transfer_room(3874, 235, 192)
+		transfer_room(3864, 235, 192)
+		transfer_room(3873, 235, 192)
+		data.nav_segments[235].neighbours[192] = { 6820, 6821, 6822, 6787, 6788, 6789 }
+		data.nav_segments[192].neighbours[235] = { 6820, 6821, 6822, 6787, 6788, 6789 }
 
-		transfer_room(2627, 214, 192)
-		data.nav_segments[214].neighbours[192] = { 4662, 4663, 4664 }
-		data.nav_segments[192].neighbours[214] = { 4662, 4663, 4664 }
+		transfer_room(2602, 214, 192)
+		data.nav_segments[214].neighbours[192] = { 4616, 4617, 4618 }
+		data.nav_segments[192].neighbours[214] = { 4616, 4617, 4618 }
 
 		itr_original_navigationmanager_setloaddata(self, data)
 	end
@@ -502,6 +496,8 @@ elseif level_id == 'mia_1' then
 		transfer_room(1906, 20, 113)
 		transfer_room(1907, 20, 113)
 		transfer_room(1910, 20, 113)
+		-- x64 resolves neighbours from doors: underground dead end 1908 must move too or door 3223 links 20 and 113
+		transfer_room(1908, 20, 113)
 		data.nav_segments[20].neighbours[113] = {3207}
 		data.nav_segments[113].neighbours[20] = {3207}
 
@@ -590,6 +586,15 @@ elseif level_id == 'skm_mallcrasher' then
 		data.nav_segments[11].neighbours[8] = {}
 
 		itr_original_navigationmanager_setloaddata(self, data)
+
+		-- x64 drops serialized neighbours; empty the resolved coarse portals like r200's empty lists.
+		-- The keys stay so native remove/add_nav_seg_neighbours events never index a nil list.
+		for _, pair in ipairs({ { '8', '11' }, { '11', '8' } }) do
+			local seg = self._nav_segments[pair[1]]
+			if seg and seg.neighbours[pair[2]] then
+				seg.neighbours[pair[2]] = {}
+			end
+		end
 	end
 
 elseif level_id == 'watchdogs_1' then
@@ -706,18 +711,14 @@ local nav_data_sigs = {
 	arm_for = -1033523562,
 	big = 1250090475,
 	born = -752015988,
-	branchbank = -115776117,
 	chas = 1118766387,
 	crojob2 = 1676845123,
 	escape_park = 466880952,
 	escape_street = 1470878858,
-	firestarter_1 = 952805177,
-	gallery = 1380658305,
 	jewelry_store = 1306078024,
 	jolly = 617794335,
 	kenaz = 1079949878,
 	kosugi = 373270794,
-	mex = -415457450,
 	mia_1 = 710528854,
 	moon = -814267024,
 	pbr = 1972593354,
@@ -726,25 +727,102 @@ local nav_data_sigs = {
 	watchdogs_1 = -136945692,
 	skm_mallcrasher = 598935744,
 }
-nav_data_sigs.framing_frame_1 = nav_data_sigs.gallery
 
-local patch_skip_reported
+-- Remapped patches check the exact x64 rows they edit instead of a whole-asset signature.
+-- room = { segment, x_neg, x_pos, y_neg, y_pos }; door = { low_room, high_room, low_x, low_y, high_x, high_y }
+local nav_data_contracts = {
+	branchbank = {
+		rooms = {
+			[294] = { 15, -110, -97, 113, 151 },
+			[333] = { 15, -126, -124, 113, 139 },
+			[423] = { 17, -130, -129, 76, 79 },
+			[427] = { 17, -140, -137, 66, 67 },
+			[451] = { 18, -117, -115, 39, 47 },
+			[470] = { 18, -115, -113, 40, 42 },
+			[472] = { 18, -132, -129, 52, 53 },
+		},
+		doors = {
+			[863] = { 451, 470, -115, 40, -115, 42 },
+		},
+	},
+	firestarter_1 = {
+		rooms = {
+			[572] = { 52, -15, -13, 163, 164 },
+			[1120] = { 29, -13, -12, 157, 159 },
+		},
+		doors = {},
+	},
+	mex = {
+		rooms = {
+			[2602] = { 214, 67, 68, -324, -296 },
+			[3864] = { 235, 64, 68, -367, -365 },
+			[3871] = { 235, 64, 68, -376, -374 },
+			[3873] = { 235, 67, 68, -365, -363 },
+			[3874] = { 235, 67, 68, -374, -367 },
+			[3881] = { 235, 64, 65, -374, -373 },
+			[3882] = { 235, 67, 68, -381, -376 },
+			[3883] = { 235, 67, 68, -385, -382 },
+			[3891] = { 235, 67, 68, -390, -387 },
+		},
+		doors = {
+			[4616] = { 2608, 2602, 67, -301, 67, -299 },
+			[4617] = { 2609, 2602, 67, -311, 67, -309 },
+			[4618] = { 2610, 2602, 67, -320, 67, -318 },
+			[6787] = { 3861, 3871, 64, -376, 64, -374 },
+			[6788] = { 3861, 3881, 64, -374, 64, -373 },
+			[6789] = { 3861, 3864, 64, -367, 64, -365 },
+			[6820] = { 3880, 3883, 67, -385, 68, -385 },
+			[6821] = { 3891, 3880, 67, -387, 68, -387 },
+			[6822] = { 3880, 2378, 68, -387, 68, -385 },
+		},
+	},
+}
+
 local function _skip_patch(reason)
-	if not patch_skip_reported then
-		patch_skip_reported = true
-		Iter:log(('skipped %s navigation patch: %s'):format(level_id, reason))
-	end
+	log(('[Iter] skipped %s navigation patch: %s'):format(level_id, reason))
 	return false
+end
+
+local function _matches_contract(data, contract)
+	for id, row in pairs(contract.rooms) do
+		local vg = data.vis_groups[data.room_vis_groups[id]]
+		if
+			not (
+				vg
+				and vg.seg == row[1]
+				and vg.rooms[id]
+				and data.room_borders_x_neg[id] == row[2]
+				and data.room_borders_x_pos[id] == row[3]
+				and data.room_borders_y_neg[id] == row[4]
+				and data.room_borders_y_pos[id] == row[5]
+			)
+		then
+			return _skip_patch('changed room ' .. id)
+		end
+	end
+	for id, row in pairs(contract.doors) do
+		local low, high = data.door_low_pos[id], data.door_high_pos[id]
+		if
+			not (
+				low
+				and high
+				and data.door_low_rooms[id] == row[1]
+				and data.door_high_rooms[id] == row[2]
+				and low.x == row[3]
+				and low.y == row[4]
+				and high.x == row[5]
+				and high.y == row[6]
+			)
+		then
+			return _skip_patch('changed door ' .. id)
+		end
+	end
+	return true
 end
 
 local function _is_expected_data(data)
 	if data.version ~= 5 then
-		return _skip_patch(('unsupported schema %s'):format(tostring(data.version)))
-	end
-	for _, field in ipairs({ 'nav_segments', 'vis_groups', 'door_low_pos', 'door_high_pos' }) do
-		if type(data[field]) ~= 'table' then
-			return _skip_patch('missing v5 field ' .. field)
-		end
+		return _skip_patch('unsupported schema ' .. tostring(data.version))
 	end
 
 	local tbls = {
@@ -761,20 +839,26 @@ local function _is_expected_data(data)
 		'room_heights_xp_yp',
 		'room_vis_groups',
 	}
-	local sig = 0
-	for _, tblname in ipairs(tbls) do
-		local values = data[tblname]
-		if type(values) ~= 'table' then
+	for _, tblname in ipairs({ 'nav_segments', 'vis_groups', 'door_low_pos', 'door_high_pos', unpack(tbls) }) do
+		if type(data[tblname]) ~= 'table' then
 			return _skip_patch('missing v5 field ' .. tblname)
 		end
-		for _, n in ipairs(values) do
+	end
+
+	local contract = nav_data_contracts[level_id]
+	if contract then
+		return _matches_contract(data, contract)
+	end
+
+	local sig = 0
+	for _, tblname in ipairs(tbls) do
+		for _, n in ipairs(data[tblname]) do
 			sig = feed_int(sig, n)
 		end
 	end
 
-	local is_ok = sig == nav_data_sigs[level_id]
-	if not is_ok then
-		return _skip_patch(('unknown v5 signature %i'):format(sig))
+	if sig ~= nav_data_sigs[level_id] then
+		return _skip_patch(('outdated signature %i'):format(sig))
 	end
 
 	return true
@@ -826,8 +910,10 @@ function NavigationManager:set_load_data(data)
 				seg = navseg_id,
 				vis_groups = {}
 			}
+			-- visible groups are keyed by visibility-group index, not segment id
+			local vg_id = #data.vis_groups + 1
 			for k, v in pairs(data.vis_groups) do
-				v.vis_groups[navseg_id] = true
+				v.vis_groups[vg_id] = true
 				vg.vis_groups[k] = true
 			end
 			table.insert(data.vis_groups, vg)

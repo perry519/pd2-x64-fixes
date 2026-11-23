@@ -90,6 +90,9 @@ function ObjectInteractionManager:_update_targeted(player_pos, player_unit, hand
 		else
 			local distance = mvec3_dis(player_pos, last_active_interaction:interact_position())
 			if last_active_interaction:interact_dont_interupt_on_distance() or distance <= last_active_interaction:interact_distance() then
+				if last_active_interaction:text_dirty() then
+					last_active_interaction:update_show_interact(player_unit, self._active_locator)
+				end
 				return
 			end
 		end
@@ -103,7 +106,8 @@ function ObjectInteractionManager:_update_targeted(player_pos, player_unit, hand
 		return
 	end
 
-	local current_dot = last_active and self._current_dot or 0.9
+	local last_dot = last_active and self._current_dot or nil
+	local current_dot
 	local best_current_dot = 0
 	local last_active_locator = self._active_locator
 
@@ -126,6 +130,8 @@ function ObjectInteractionManager:_update_targeted(player_pos, player_unit, hand
 			local i_dis = interaction:interact_distance()
 			local i_pos = interaction:interact_position()
 			local ray_objects = interaction:ray_objects()
+			local dot_limit = interaction:dot_limit()
+			local threshold_dot = current_dot or last_dot or dot_limit
 
 			if ray_objects and interaction.use_locators and interaction:use_locators() then
 				local min_dis = 10000000000000000000000
@@ -149,7 +155,7 @@ function ObjectInteractionManager:_update_targeted(player_pos, player_unit, hand
 						mvec3_sub(mvec1, camera_pos)
 						mvec3_norm(mvec1)
 						local dot = mvec3_dot(player_fwd, mvec1)
-						if dot > 0.9 and interaction:can_select(player_unit, locator) and mvec3_dis(player_pos, locator:position()) <= i_dis and (current_dot <= dot or locator == last_active_locator and dot > 0.9) then
+						if dot > dot_limit and interaction:can_select(player_unit, locator) and mvec3_dis(player_pos, locator:position()) <= i_dis and ((current_dot or threshold_dot) <= dot or locator == last_active_locator and dot > dot_limit) then
 							local interact_axis = interaction:interact_axis()
 							if (not interact_axis or 0 > mvec3_dot(mvec1, interact_axis)) and self:_raycheck_ok(unit, camera_pos, locator) then
 								if closest_locator and player_unit then
@@ -173,7 +179,7 @@ function ObjectInteractionManager:_update_targeted(player_pos, player_unit, hand
 					mvec3_norm(mvec1)
 					local dot = mvec3_dot(player_fwd, mvec1)
 					item.dot = dot
-					if dot > current_dot or unit == last_active and dot > 0.9 and dot >= best_current_dot then
+					if dot > threshold_dot or unit == last_active and dot > dot_limit and dot >= best_current_dot then
 						local interact_axis = interaction:interact_axis()
 						if (not interact_axis or mvec3_dot(mvec1, interact_axis) < 0) and self:_raycheck_ok(unit, camera_pos) then
 							current_dot = dot
@@ -251,9 +257,11 @@ function ObjectInteractionManager:_update_targeted(player_pos, player_unit, hand
 		if not last_active_interaction:selected(player_unit, self._active_locator, hand_id) then
 			active_unit = nil
 		end
+	elseif last_active and last_active_interaction:text_dirty() then
+		last_active_interaction:update_show_interact(player_unit, self._active_locator)
 	end
 	self._active_unit = active_unit
-	self._current_dot = current_dot
+	self._current_dot = current_dot or last_dot
 
 	if last_active and not active_unit then
 		last_active_interaction:unselect()

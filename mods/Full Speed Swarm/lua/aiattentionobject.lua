@@ -89,13 +89,30 @@ function AIAttentionObject:update(unit, t, dt)
 	self._attention_obj:m_position(self._observer_info_m_pos)
 end
 
+local _fs_update_disabled = setmetatable({}, { __mode = 'k' })
+
 function AIAttentionObject:fs_update(unit, t, dt)
 	if not FullSpeedSwarm:allow_stealth_changes() then
 		return fs_original_aiattentionobject_update(self, unit, t, dt)
 	end
 
+	_fs_update_disabled[self] = true
 	self:set_update_enabled(false)
 end
+
+local function _reenable_native_updates()
+	if FullSpeedSwarm:allow_stealth_changes() then
+		return
+	end
+
+	for attention in pairs(_fs_update_disabled) do
+		_fs_update_disabled[attention] = nil
+		if alive(attention._unit) then
+			attention:set_update_enabled(true)
+		end
+	end
+end
+table.insert(FullSpeedSwarm.call_on_stealth, _reenable_native_updates)
 
 if Network:is_client() then
 	AIAttentionObject.update = AIAttentionObject.fs_update

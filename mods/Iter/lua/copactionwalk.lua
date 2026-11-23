@@ -20,16 +20,15 @@ function CopActionWalk:_init()
 	local internal_data = brain and brain._logic_data and brain._logic_data.internal_data
 	local coarse_path = internal_data and internal_data.coarse_path
 	self.itr_access_neg = coarse_path and coarse_path.itr_access_neg
+
 	local nav_path = self._nav_path
 	if nav_path and not nav_path[2] then
-		local expand_nav_path
 		local action_desc = self._action_desc
-		if action_desc.path_simplified and action_desc.persistent then
-			expand_nav_path = true
-		elseif not managers.groupai:state():enemy_weapons_hot() then
-			expand_nav_path = true
+		if
+			action_desc.path_simplified and action_desc.persistent or not managers.groupai:state():enemy_weapons_hot()
+		then
+			table.insert(nav_path, 1, mvec3_cpy(self._common_data.pos))
 		end
-		if expand_nav_path then table.insert(nav_path, 1, mvector3.copy(self._common_data.pos)) end
 	end
 
 	local result = itr_original_copactionwalk_init(self)
@@ -37,6 +36,27 @@ function CopActionWalk:_init()
 	if result and self._sync then self:itr_prepare_for_upcoming_navlink() end
 
 	return result
+end
+
+function CopActionWalk:itr_delete_path_ahead()
+	if not self.itr_step_pos then return end
+
+	local s_path = self._simplified_path
+	if s_path[1] == self.itr_step_pos then
+		self._expired = true
+		return
+	end
+
+	for i = 2, #s_path do
+		if s_path[i] == self.itr_step_pos then
+			local reserved = self.itr_reserved_navlink_element
+			while s_path[i + 1] do
+				local removed = table.remove(s_path, i + 1)
+				if reserved and removed.element == reserved then self:itr_clear_navlink_reservation(reserved) end
+			end
+			break
+		end
+	end
 end
 
 if Network:is_server() then
@@ -53,9 +73,12 @@ if Network:is_server() then
 	end
 
 	function CopActionWalk:itr_append_next_step(path)
-		if not self:itr_check_extensible() then return end
+		local s_path = self._simplified_path
+		local from = self.itr_path_ahead_from
+		self.itr_path_ahead_from = nil
+		if not from or not s_path or s_path[#s_path] ~= from or not self:itr_check_extensible() then return end
 
-		processed_path = {}
+		local processed_path = {}
 		for _, nav_point in ipairs(path) do
 			if nav_point.x then
 				table.insert(processed_path, nav_point)
@@ -69,11 +92,10 @@ if Network:is_server() then
 			end
 		end
 
-		local nr = #self._simplified_path
-		self.itr_step_pos = self._nav_point_pos(self._simplified_path[nr])
-		local good_pos = mvec3_cpy(self.itr_step_pos)
+		local nr = #s_path
+		self.itr_step_pos = self._nav_point_pos(s_path[nr])
 		local simplified_path = self._calculate_simplified_path(
-			good_pos,
+			mvec3_cpy(self.itr_step_pos),
 			processed_path,
 			(not self._sync or self._common_data.stance.name == 'ntl') and 2 or 1,
 			self._sync,
@@ -82,8 +104,13 @@ if Network:is_server() then
 
 		for i = 2, #simplified_path do
 			nr = nr + 1
-			self._simplified_path[nr] = simplified_path[i]
+			s_path[nr] = simplified_path[i]
 		end
+
+		self._common_data.ext_brain:add_pos_rsrv('move_dest', {
+			radius = 30,
+			position = mvec3_cpy(self._nav_point_pos(s_path[nr])),
+		})
 
 		return true
 	end
@@ -91,8 +118,10 @@ if Network:is_server() then
 	function CopActionWalk:itr_check_navlink_delay(t)
 		local navlink = self._next_is_nav_link.c_class
 		if alive(navlink) then
-			local delay_t = self._next_is_nav_link.c_class:delay_time()
+			local delay_t = navlink:delay_time()
 			if not delay_t or t >= delay_t then return true end
+		else
+			return true
 		end
 	end
 
@@ -110,9 +139,9 @@ if Network:is_server() then
 	local itr_original_copactionwalk_playnavlinkanim = CopActionWalk._play_nav_link_anim
 	function CopActionWalk:_play_nav_link_anim(t)
 		if self:itr_check_navlink_delay(t) then
-			local element = self._next_is_nav_link.element
 			self:itr_set_navlink_delay(t)
-			self:itr_clear_navlink_reservation(element)
+			self:itr_clear_navlink_reservation(self._next_is_nav_link.element)
+			self.itr_wait_for_navlink_availability_t = nil
 			itr_original_copactionwalk_playnavlinkanim(self, t)
 		end
 	end
@@ -138,10 +167,6 @@ if Network:is_server() then
 
 	local function itr_set_navlink_reservation(self, navlink_element)
 		if self.itr_reserved_navlink_element ~= navlink_element then self:itr_clear_navlink_reservation() end
-		if navlink_element.itr_reserved_by_action ~= self then
-			if navlink_element.itr_reserved_by_action then Iter:count_runtime(managers.navigation, 'released') end
-			Iter:count_runtime(managers.navigation, 'reserved')
-		end
 		navlink_element.itr_reserved_by_unit = self._unit
 		navlink_element.itr_reserved_by_action = self
 		self.itr_reserved_navlink_element = navlink_element
@@ -220,7 +245,6 @@ if Network:is_server() then
 					end
 				end
 				itr_set_navlink_reservation(self, alt_navlink_element)
-				Iter:count_runtime(managers.navigation, 'switched')
 				self.itr_wait_for_navlink = nil
 
 				return true
@@ -235,7 +259,6 @@ if Network:is_server() then
 		if not navlink_element then return end
 
 		if navlink_element.itr_reserved_by_action == self then
-			Iter:count_runtime(managers.navigation, 'released')
 			navlink_element.itr_reserved_by_unit = nil
 			navlink_element.itr_reserved_by_action = nil
 			if
@@ -297,10 +320,12 @@ if Network:is_server() then
 				local wait_pos =
 					self:itr_get_wait_pos(navlink_element._values.itr_from_navseg, navlink_element._values.position)
 				if wait_pos then
-					self._common_data.ext_brain:add_pos_rsrv('stand', {
+					local rsrv = {
 						radius = 30,
 						position = mvec3_cpy(wait_pos),
-					})
+					}
+					self._common_data.ext_brain:add_pos_rsrv('stand', rsrv)
+					self.itr_wait_rsrv = rsrv
 					table.insert(self._simplified_path, index, wait_pos)
 				end
 			end
@@ -313,6 +338,7 @@ if Network:is_server() then
 			self.fs_wanted_walk_dir_cached = nil
 			self.fs_move_dir_norm_cached = nil
 			if self._nav_point_pos(self._simplified_path[2]) == self.itr_step_pos then
+				-- the appended coarse step begins here: let the logic advance its coarse index while this action keeps running
 				self.itr_fake_complete = true
 				self._common_data.ext_brain:action_complete_clbk(self)
 				self.itr_fake_complete = nil
@@ -343,36 +369,26 @@ if Network:is_server() then
 		end
 
 		self:_set_updator(self._start_run and '_upd_start_anim_first_frame' or nil)
-		self._common_data.ext_brain:rem_pos_rsrv('stand')
+		self:itr_release_wait_rsrv()
 		self.itr_wait_for_navlink = nil
 		self:update(t)
+	end
+
+	function CopActionWalk:itr_release_wait_rsrv()
+		local rsrv = self.itr_wait_rsrv
+		if not rsrv then return end
+
+		self.itr_wait_rsrv = nil
+		local brain = self._common_data.ext_brain
+		if brain:get_pos_rsrv('stand') == rsrv then brain:rem_pos_rsrv('stand') end
 	end
 
 	local itr_original_CopActionWalk_onexit = CopActionWalk.on_exit
 	function CopActionWalk:on_exit()
 		self.itr_path_ahead = false
 		self:itr_clear_navlink_reservation()
+		self:itr_release_wait_rsrv()
 		return itr_original_CopActionWalk_onexit(self)
-	end
-end
-
-function CopActionWalk:itr_delete_path_ahead()
-	if not self.itr_step_pos then return end
-
-	local s_path = self._simplified_path
-	if s_path[1] == self.itr_step_pos then
-		self._expired = true
-		return
-	end
-
-	for i = 2, #s_path do
-		local pos = s_path[i]
-		if pos == self.itr_step_pos then
-			while s_path[i + 1] do
-				table.remove(s_path, i + 1)
-			end
-			break
-		end
 	end
 end
 

@@ -420,9 +420,19 @@ Iter.navlengths = {
 	gen_stun_conc_shield = Vector3(-102.432, -44.814, 0.133211), -- 111
 }
 
+-- Accepts a Rotation or a finalized finite numeric yaw; anything else is rejected before native math.
 function Iter:get_navlink_vector(so_action, rotation)
 	local vbase = so_action and self.navlengths[so_action]
 	if not vbase then
+		return false
+	end
+
+	if type(rotation) == 'number' then
+		if rotation ~= rotation or math.abs(rotation) == math.huge then
+			return false
+		end
+		rotation = Rotation(rotation, 0, 0)
+	elseif type_name(rotation) ~= 'Rotation' then
 		return false
 	end
 
@@ -430,4 +440,47 @@ function Iter:get_navlink_vector(so_action, rotation)
 	mvector3.set(result, vbase)
 	mvector3.rotate_with(result, rotation)
 	return result
+end
+
+Iter.navlink_verified_actions = {
+	e_nl_up_1m = true,
+	e_nl_down_1m = true,
+}
+
+function Iter:get_rebuilt_navlink_endpoint(values)
+	if not (values.is_navigation_link and values.itr_window and self.navlink_verified_actions[values.so_action]) then
+		return
+	end
+	if type_name(values.position) ~= 'Vector3' or type_name(values.search_position) ~= 'Vector3' then
+		return
+	end
+
+	local landing = self:get_navlink_vector(values.so_action, values.rotation)
+	if not landing then
+		return
+	end
+	mvector3.add(landing, values.position)
+
+	local nav = managers.navigation
+	local tracker = nav:create_nav_tracker(landing, true)
+	local pos_on_field = mvector3.copy(tracker:field_position())
+	local same_seg = tracker:nav_segment() == nav:get_nav_seg_from_pos(values.search_position, true)
+	nav:destroy_nav_tracker(tracker)
+
+	if same_seg or mvector3.distance(values.search_position, pos_on_field) > 200 then
+		return pos_on_field
+	end
+end
+
+if not Iter.settings.rebuild_navlinks then
+	return
+end
+
+local itr_original_elementspecialobjective_finalize_values = ElementSpecialObjective._finalize_values
+function ElementSpecialObjective:_finalize_values(values)
+	if managers.navigation and managers.navigation:is_data_ready() then
+		values.search_position = Iter:get_rebuilt_navlink_endpoint(values) or values.search_position
+	end
+
+	return itr_original_elementspecialobjective_finalize_values(self, values)
 end

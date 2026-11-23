@@ -95,8 +95,8 @@ PlayerStandard._update_crosshair_offset = function(self, ...)
 end
 
 local fs_original_playerstandard_startactionsteelsight = PlayerStandard._start_action_steelsight
-function PlayerStandard:_start_action_steelsight(t, gadget_state)
-	fs_original_playerstandard_startactionsteelsight(self, t, gadget_state)
+function PlayerStandard:_start_action_steelsight(t, ...)
+	fs_original_playerstandard_startactionsteelsight(self, t, ...)
 	self:fs_update_crosshair_offset(t)
 end
 

@@ -1,9 +1,11 @@
 local key = ModPath .. '	' .. RequiredScript
-if _G[key] then return else _G[key] = true end
-
-if not Iter.settings.streamline_path then
+if _G[key] then
 	return
+else
+	_G[key] = true
 end
+
+if not Iter.settings.streamline_path then return end
 
 local itr_original_coplogicidle_performobjectiveaction = CopLogicIdle._perform_objective_action
 function CopLogicIdle._perform_objective_action(data, my_data, objective)

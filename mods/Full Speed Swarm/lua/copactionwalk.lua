@@ -108,6 +108,9 @@ local function _set_loud()
 	_is_loud = true
 end
 table.insert(FullSpeedSwarm.call_on_loud, _set_loud)
+table.insert(FullSpeedSwarm.call_on_stealth, function()
+	_is_loud = false
+end)
 
 if Network:is_client() then
 	function CopActionWalk:_get_current_max_walk_speed(move_dir)

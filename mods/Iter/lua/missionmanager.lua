@@ -27,7 +27,7 @@ function ElementAINavSeg:on_executed(instigator)
 
 	local segs = self._values.segment_ids
 	for i = 1, #segs, 2 do
-		managers.navigation:clbk_navfield(self._values.operation, { [segs[i]] = {segs[i + 1]} })
+		managers.navigation:clbk_navfield(self._values.operation, { [tostring(segs[i])] = {tostring(segs[i + 1])} })
 	end
 
 	ElementAINavSeg.super.on_executed(self, instigator)
@@ -65,7 +65,10 @@ function ElementChangeBodyProperty:on_executed(instigator)
 	end
 
 	for _, thing in ipairs(self._values.things) do
-		local unit = managers.worlddefinition:get_unit_on_load(thing[1], callback(self, self, '_change', thing[2], thing[3], thing[4]))
+		-- WorldDefinition delivers a delayed unit as call(unit); callback() would bind only thing[2]
+		local unit = managers.worlddefinition:get_unit_on_load(thing[1], function(loaded_unit)
+			self:_change(loaded_unit, thing)
+		end)
 		if unit then
 			self:_change(unit, thing)
 		end

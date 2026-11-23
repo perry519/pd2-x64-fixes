@@ -112,6 +112,12 @@ local function _set_loud()
 	_base_delay = _nervous_game and 0.5 or 1
 end
 table.insert(FullSpeedSwarm.call_on_loud, _set_loud)
+table.insert(FullSpeedSwarm.call_on_stealth, function()
+	_is_loud = false
+	_nervous_game = false
+	_eyes_wide_open = false
+	_base_delay = 0.1
+end)
 
 local _mask_enemies
 DelayedCalls:Add('DelayedModFSS_coplogicbase_maskenemies', 0, function()
@@ -315,7 +321,7 @@ function CopLogicBase._upd_attention_obj_detection(data, min_reaction, max_react
 									local attention_pos_z = mvec3_z(attention_pos)
 									if math_abs(attention_pos_z - mvec3_z(my_pos)) < 300 then
 										mvec3_set(near_pos, attention_pos)
-										mvec3_set_z(near_pos, attention_pos_z + 100)
+										mvec3_set_z(near_pos, attention_pos_z + math.lerp(100, 10, dis / 2000))
 										local visibility_slotmask = data.visibility_slotmask
 										local near_vis_ray = wraycast(World, 'ray', my_pos, near_pos, 'slot_mask', visibility_slotmask, 'ray_type', 'ai_vision', 'report')
 										if near_vis_ray then
@@ -650,56 +656,78 @@ function CopLogicBase._destroy_all_detected_attention_object_data(data)
 	data.detected_attention_objects_i = FullSpeedSwarm.metaize_i(data.detected_attention_objects)
 end
 
-local _nervous_focus_delays = {}
-local _cop_awareness_face_enemy = {}
-local _cop_awareness_face_enemy_seen = {}
+-- snapshots are taken on apply and released on restore, so turning an option off after it mutated tweak data still restores it
+local _nervous_focus_delays
+local _cop_awareness_face_enemy
+
+local function _set_focus_delay(tbl, enabled, mutate)
+	if enabled then
+		if _nervous_focus_delays[tbl] == nil then
+			_nervous_focus_delays[tbl] = tbl.focus_delay
+		end
+		tbl.focus_delay = mutate(_nervous_focus_delays[tbl])
+	elseif _nervous_focus_delays[tbl] ~= nil then
+		tbl.focus_delay = _nervous_focus_delays[tbl]
+	end
+end
+
+local function _min_one(v)
+	return math.min(1, v)
+end
+
+local function _third(v)
+	return math.max(0.5, v / 3)
+end
 
 local function _set_nervous_game_tweaks(enabled)
-	if fs_settings.nervous_game then
-		for name, character in pairs(tweak_data.character) do
-			if name ~= 'presets' and type(character) == 'table' and type(character.weapon) == 'table' then
-				for _, weapon in pairs(character.weapon) do
-					if weapon.focus_delay then
-						if _nervous_focus_delays[weapon] == nil then
-							_nervous_focus_delays[weapon] = weapon.focus_delay
-						end
-						weapon.focus_delay = enabled and math.min(1, _nervous_focus_delays[weapon]) or _nervous_focus_delays[weapon]
-					end
-				end
-			end
-		end
-		for level, presets in pairs(tweak_data.character.presets.weapon) do
-			for _, preset in pairs(presets) do
-				if preset.focus_delay then
-					if _nervous_focus_delays[preset] == nil then
-						_nervous_focus_delays[preset] = preset.focus_delay
-					end
-					preset.focus_delay = enabled and math.max(0.5, _nervous_focus_delays[preset] / 3) or _nervous_focus_delays[preset]
+	enabled = enabled and fs_settings.nervous_game and true or false
+	if enabled == (_nervous_focus_delays ~= nil) then
+		return
+	end
+
+	_nervous_focus_delays = _nervous_focus_delays or {}
+	for name, character in pairs(tweak_data.character) do
+		if name ~= 'presets' and type(character) == 'table' and type(character.weapon) == 'table' then
+			for _, weapon in pairs(character.weapon) do
+				if weapon.focus_delay then
+					_set_focus_delay(weapon, enabled, _min_one)
 				end
 			end
 		end
 	end
+	for _, presets in pairs(tweak_data.character.presets.weapon) do
+		for _, preset in pairs(presets) do
+			if preset.focus_delay then
+				_set_focus_delay(preset, enabled, _third)
+			end
+		end
+	end
+	if not enabled then
+		_nervous_focus_delays = nil
+	end
 end
 
 local function _set_cop_awareness_tweaks(enabled)
-	if fs_settings.cop_awareness then
+	enabled = enabled and fs_settings.cop_awareness and true or false
+	if enabled == (_cop_awareness_face_enemy ~= nil) then
+		return
+	end
+
+	if enabled then
+		_cop_awareness_face_enemy = {}
 		for name, character in pairs(tweak_data.character) do
-			if name == 'presets' then
-				-- qued
-			elseif name == 'cop_scared' then
-				-- qued
-			elseif type(character) == 'table' and type(character.tags) == 'table' then
-				if table.contains(character.tags, 'law') then
-					if not table.contains(character.tags, 'special') then
-						if not _cop_awareness_face_enemy_seen[character] then
-							_cop_awareness_face_enemy_seen[character] = true
-							_cop_awareness_face_enemy[character] = character.always_face_enemy
-						end
-						character.always_face_enemy = enabled and true or _cop_awareness_face_enemy[character]
-					end
+			if name ~= 'presets' and name ~= 'cop_scared' and type(character) == 'table' and type(character.tags) == 'table' then
+				if table.contains(character.tags, 'law') and not table.contains(character.tags, 'special') then
+					_cop_awareness_face_enemy[character] = { character.always_face_enemy }
+					character.always_face_enemy = true
 				end
 			end
 		end
+	else
+		for character, original in pairs(_cop_awareness_face_enemy) do
+			character.always_face_enemy = original[1]
+		end
+		_cop_awareness_face_enemy = nil
 	end
 end
 

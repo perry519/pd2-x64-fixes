@@ -3,7 +3,10 @@
 	"itr_options_menu_desc"  : "",
 
 	"itr_options_streamline_path_title" : "Improve NPC pathing",
-	"itr_options_streamline_path_desc" : "Streamlined paths, improved queueing for things like ladders.\nChange will be effective after a heist restart.",
+	"itr_options_streamline_path_desc" : "Streamlined paths, continuous movement, improved queueing and shortcuts.\nChange will be effective after a heist restart.",
+
+	"itr_options_rebuild_navlinks_title" : "Rebuild NavLinks",
+	"itr_options_rebuild_navlinks_desc" : "Rebuild measured endpoints on Iter crew-window links.\nChange will be effective after a heist restart.",
 
 	"itr_options_map_change_alex_1_title" : "$heist_alex ($heist_alex_1_hl)",
 	"itr_options_map_change_alex_2_title" : "$heist_alex ($heist_alex_2_hl)",

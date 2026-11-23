@@ -19,8 +19,10 @@ if Network:is_client() then
 		function MissionScript:load(data)
 			fs_original_missionscript_load(self, data)
 			if type(data.fs_conf) == 'table' then
-				_G.FullSpeedSwarm.host_settings = data.fs_conf
+				local fss = _G.FullSpeedSwarm
+				fss.host_settings = data.fs_conf
 				data.fs_conf = nil
+				fss:finalize_settings()
 			end
 		end
 	end)

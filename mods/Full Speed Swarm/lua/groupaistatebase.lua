@@ -3,6 +3,12 @@ if _G[key] then return else _G[key] = true end
 
 local _is_loud
 local fs_settings = FullSpeedSwarm.final_settings
+table.insert(FullSpeedSwarm.call_on_loud, function()
+	_is_loud = true
+end)
+table.insert(FullSpeedSwarm.call_on_stealth, function()
+	_is_loud = false
+end)
 
 local fs_original_groupaistatebase_onaiattentionchanged = GroupAIStateBase.on_AI_attention_changed
 local fs_original_groupaistatebase_getaiattentionobjectsbyfilter = GroupAIStateBase.get_AI_attention_objects_by_filter
@@ -62,12 +68,8 @@ function GroupAIStateBase:on_enemy_weapons_hot(...)
 
 	fs_original_groupaistatebase_onenemyweaponshot(self, ...)
 	_is_loud = true
-	if not enemy_weapons_hot then
-		self:fs_refresh_attention_extensions()
-		self:fs_reset_attention_lists()
-		for _, fct in pairs(FullSpeedSwarm.call_on_loud) do
-			fct()
-		end
+	if not enemy_weapons_hot and not self.fs_loading then
+		FullSpeedSwarm:refresh_mode_sensitive_state(self)
 	end
 end
 
@@ -76,14 +78,19 @@ function GroupAIStateBase:set_whisper_mode(enabled, ...)
 	local was_enabled = self._whisper_mode
 	local result = fs_original_groupaistatebase_setwhispermode(self, enabled, ...)
 
-	if enabled ~= was_enabled then
-		self:fs_reset_attention_lists()
-		local callbacks = enabled and FullSpeedSwarm.call_on_stealth or FullSpeedSwarm.call_on_loud
-		for _, fct in pairs(callbacks) do
-			fct()
-		end
+	if enabled ~= was_enabled and not self.fs_loading then
+		FullSpeedSwarm:refresh_mode_sensitive_state(self)
 	end
 
+	return result
+end
+
+local fs_original_groupaistatebase_load = GroupAIStateBase.load
+function GroupAIStateBase:load(...)
+	self.fs_loading = true
+	local result = fs_original_groupaistatebase_load(self, ...)
+	self.fs_loading = nil
+	FullSpeedSwarm:refresh_mode_sensitive_state(self)
 	return result
 end
 

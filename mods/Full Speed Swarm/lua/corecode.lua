@@ -96,8 +96,8 @@ function FullSpeedSwarm:get_gameplay_options_forced_values()
 	return result
 end
 
-function FullSpeedSwarm:is_stealth_active()
-	local state = managers and managers.groupai and managers.groupai:state()
+function FullSpeedSwarm:is_stealth_active(state)
+	state = state or managers and managers.groupai and managers.groupai:state()
 	if not state then
 		return false
 	end
@@ -135,8 +135,8 @@ function FullSpeedSwarm:ensure_attention_extensions(attention_data)
 	return attention_data
 end
 
-function FullSpeedSwarm:refresh_mode_sensitive_state()
-	local state = managers and managers.groupai and managers.groupai:state()
+function FullSpeedSwarm:refresh_mode_sensitive_state(state)
+	state = state or managers and managers.groupai and managers.groupai:state()
 	if not state then
 		self:update_max_task_throughput()
 		return
@@ -149,7 +149,7 @@ function FullSpeedSwarm:refresh_mode_sensitive_state()
 		state:fs_reset_attention_lists()
 	end
 
-	local callbacks = self:is_stealth_active() and self.call_on_stealth or self.call_on_loud
+	local callbacks = self:is_stealth_active(state) and self.call_on_stealth or self.call_on_loud
 	for _, fct in pairs(callbacks) do
 		fct()
 	end

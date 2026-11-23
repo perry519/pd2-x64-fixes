@@ -118,6 +118,10 @@ function VehicleDrivingExt:set_tweak_data(...)
 end
 
 function VehicleDrivingExt:_catch_loot()
+	if not self:is_accepting_loot_enabled() then
+		return false
+	end
+
 	if not self._interaction_loot or self._tweak_data and self._tweak_data.max_loot_bags <= #self._loot then
 		return false
 	end
@@ -125,13 +129,24 @@ function VehicleDrivingExt:_catch_loot()
 	for _, loot_point in ipairs(self.fs_loot_points) do
 		if loot_point.object then
 			local pos = loot_point.object:position()
-			local equipements = World:find_units_quick('sphere', pos, 100, 14)
-			for _, unit in ipairs(equipements) do
-				local carry_data = unit:carry_data()
-				if carry_data and self:_loot_filter_func(carry_data) then
-					self:_store_loot(unit)
-					break
+			local caught_units = World:find_units_quick('sphere', pos, 100, 14)
+			if #caught_units > 0 then
+				for _, unit in ipairs(caught_units) do
+					if alive(unit) then
+						local carry_data = unit:carry_data()
+						if carry_data and carry_data:can_secure() then
+							if self:_loot_filter_func(carry_data) then
+								self:_store_loot(unit)
+								break
+							elseif not self._refused_loot_items[unit:key()] then
+								self:_refuse_loot(unit)
+								self._refused_loot_items[unit:key()] = true
+							end
+						end
+					end
 				end
+			elseif #self._refused_loot_items > 0 then
+				self._refused_loot_items = {}
 			end
 		end
 	end
@@ -139,7 +154,9 @@ end
 
 local is_server = Network:is_server()
 function VehicleDrivingExt:update(unit, t, dt)
-	self:_manage_position_reservation()
+	if self._can_reserve_positions then
+		self:_manage_position_reservation()
+	end
 
 	if is_server then
 		if self._vehicle:is_active() then

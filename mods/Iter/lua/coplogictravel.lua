@@ -7,47 +7,44 @@ end
 
 if not Iter.settings.streamline_path then return end
 
-local fs_settings = FullSpeedSwarm and FullSpeedSwarm.final_settings or {}
-
-local _is_loud = false
-function _on_enemy_weapons_hot() _is_loud = true end
-DelayedCalls:Add('DelayedModITR_enemyweaponshot_CopLogicTravel', 0, function()
-	if managers.groupai then
-		managers.groupai:state():add_listener('Iter_enemyweaponshot', { 'enemy_weapons_hot' }, _on_enemy_weapons_hot)
-	end
-end)
+local table_remove = table.remove
 
 local itr_original_coplogictravel_enter = CopLogicTravel.enter
 function CopLogicTravel.enter(data, ...)
 	itr_original_coplogictravel_enter(data, ...)
 
-	if data.is_converted or data.is_important or fs_settings.iter_chase then data.internal_data.path_ahead = true end
+	local my_data = data.internal_data
+	local fss = FullSpeedSwarm
+	local fs_settings = fss and fss.final_settings
+	local fss_chase = fs_settings
+		and fs_settings.iter_chase
+		and fss.allow_stealth_changes
+		and fss:allow_stealth_changes()
+	if data.is_converted or data.is_important or fss_chase then my_data.path_ahead = true end
 
-	if not _is_loud and data.internal_data.path_safely then data.internal_data.path_safely = nil end
+	if my_data.path_safely and not managers.groupai:state():enemy_weapons_hot() then my_data.path_safely = nil end
 end
 
 local itr_original_coplogictravel_updpathing = CopLogicTravel._upd_pathing
 function CopLogicTravel._upd_pathing(data, my_data)
 	local pathing_results = data.pathing_results
-	if pathing_results then
-		if my_data.processing_coarse_path then
-			local path = pathing_results[my_data.coarse_path_search_id]
-			if path == 'failed' and not my_data.path_safely then
-				local current_SO_element = data.objective and data.objective.followup_SO
-				if not current_SO_element then
-					-- qued
-				elseif current_SO_element._events and current_SO_element._events.fail then
-					-- qued, don't bypass error handling when it exists!
-				else
-					local unit = data.unit
-					local so_element = current_SO_element:choose_followup_SO(unit)
-					if so_element then
-						local new_objective = so_element:get_objective(unit)
-						if new_objective then
-							my_data.processing_coarse_path = nil
-							data.brain:set_objective(new_objective)
-							return
-						end
+	if pathing_results and my_data.processing_coarse_path then
+		local path = pathing_results[my_data.coarse_path_search_id]
+		if path == 'failed' and not my_data.path_safely then
+			local current_SO_element = data.objective and data.objective.followup_SO
+			if not current_SO_element then
+				-- qued
+			elseif current_SO_element._events and current_SO_element._events.fail then
+				-- qued, don't bypass error handling when it exists!
+			else
+				local unit = data.unit
+				local so_element = current_SO_element:choose_followup_SO(unit)
+				if so_element then
+					local new_objective = so_element:get_objective(unit)
+					if new_objective then
+						my_data.processing_coarse_path = nil
+						data.brain:set_objective(new_objective)
+						return
 					end
 				end
 			end
@@ -78,6 +75,8 @@ function CopLogicTravel._get_exact_move_pos(data, nav_index)
 		my_data.coarse_path = {
 			coarse_path[1],
 			coarse_path[nr],
+			has_navlinks = coarse_path.has_navlinks,
+			itr_access_neg = coarse_path.itr_access_neg,
 		}
 
 		return my_data.itr_direct_to_pos
@@ -90,7 +89,6 @@ function CopLogicTravel._get_exact_move_pos(data, nav_index)
 				my_data.moving_to_cover = nil
 			end
 			return coarse_path[nav_index][2]
-
 		elseif data.objective and data.objective.type == 'phalanx' then
 			return coarse_path[nav_index][2]
 		end
@@ -128,7 +126,6 @@ local function _update_destination(my_data, follow_unit_nav_seg, pos_rsrv_id)
 	return to_pos
 end
 
-local table_remove = table.remove
 function CopLogicTravel.itr_simplify_coarse_path(data, my_data)
 	local coarse_path = my_data.coarse_path
 	local coarse_path_nr = #coarse_path
@@ -146,7 +143,7 @@ function CopLogicTravel.itr_simplify_coarse_path(data, my_data)
 					local nr = j - i
 					if nr >= 2 then
 						must_cancel_next_path = must_cancel_next_path or i <= my_data.coarse_path_index + 1
-						for k = 1, nr do
+						for _ = 1, nr do
 							table_remove(coarse_path, i + 1)
 						end
 						coarse_path_nr = coarse_path_nr - nr
@@ -174,7 +171,7 @@ function CopLogicTravel.itr_simplify_coarse_path(data, my_data)
 							must_cancel_next_path = must_cancel_next_path or i <= my_data.coarse_path_index + 1
 							path_backup = path_backup or deep_clone(coarse_path)
 							local nr = j - 1 - i
-							for k = 1, nr do
+							for _ = 1, nr do
 								table_remove(coarse_path, i + 1)
 							end
 							coarse_path_nr = coarse_path_nr - nr
@@ -187,19 +184,19 @@ function CopLogicTravel.itr_simplify_coarse_path(data, my_data)
 		i = i + 1
 	end
 
-	-- way too late => let's go for a long detailed path instead
-	if not path_backup and not coarse_path.has_navlinks and coarse_path_nr - my_data.coarse_path_index > 4 then
+	-- way too late => let's go for a long detailed path instead; only on a path known to be navlink-free
+	if not path_backup and coarse_path.has_navlinks == false and coarse_path_nr - my_data.coarse_path_index > 4 then
 		local coarse_path_index = my_data.coarse_path_index
 
 		local function check_turn_back_on_axis(axis)
 			local ref = coarse_path[coarse_path_index][2][axis]
 			local dest_dis = coarse_path[coarse_path_nr][2][axis] - ref
-			for i = coarse_path_index + 1, coarse_path_nr - 1 do
-				local dis = coarse_path[i][2][axis] - ref
+			for k = coarse_path_index + 1, coarse_path_nr - 1 do
+				local dis = coarse_path[k][2][axis] - ref
 				if dest_dis < 0 then
-					if dis < dest_dis and dest_dis - dis > 500 then return i, dest_dis - dis end
+					if dis < dest_dis and dest_dis - dis > 500 then return k, dest_dis - dis end
 				else
-					if dis > dest_dis and dis - dest_dis > 500 then return i, dis - dest_dis end
+					if dis > dest_dis and dis - dest_dis > 500 then return k, dis - dest_dis end
 				end
 			end
 		end
@@ -229,13 +226,18 @@ function CopLogicTravel.itr_simplify_coarse_path(data, my_data)
 	end
 
 	if must_cancel_next_path then
+		-- only the advance search targets the replaced steps; other searches and results keep their owners
+		local search_id = my_data.advance_path_search_id
 		my_data.processing_advance_path = nil
-		if data.pathing_results then
-			data.pathing_results = nil
-		else
-			data.brain:cancel_all_pathing_searches()
+		my_data.advance_path = nil
+		if data.pathing_results then data.pathing_results[search_id] = nil end
+		data.brain:abort_detailed_pathing(search_id)
+
+		local walk_action = my_data.advancing
+		if walk_action then
+			walk_action.itr_path_ahead_from = nil
+			if my_data.path_ahead then walk_action:itr_delete_path_ahead() end
 		end
-		if my_data.path_ahead and my_data.advancing then my_data.advancing:itr_delete_path_ahead() end
 	end
 
 	if path_backup then
@@ -255,9 +257,10 @@ function CopLogicTravel._chk_stop_for_follow_unit(data, my_data)
 	then
 		return
 	end
+
 	if not my_data.coarse_path_index then return end
 
-	local follow_unit = data.objective.follow_unit
+	local follow_unit = objective.follow_unit
 	if not alive(follow_unit) then return end
 
 	local follow_unit_nav_seg = follow_unit:movement():nav_tracker():nav_segment()
@@ -276,14 +279,14 @@ function CopLogicTravel._chk_stop_for_follow_unit(data, my_data)
 			[2] = _update_destination(my_data, follow_unit_nav_seg, data.pos_rsrv_id),
 		}
 		data.logic.on_new_objective(data)
-
 	elseif
 		data.itr_follow_unit_nav_seg
 		and data.itr_follow_unit_nav_seg ~= follow_unit_nav_seg
 		and coarse_path[coarse_path_nr][1] ~= follow_unit_nav_seg
 	then
-		local pos = not managers.navigation._quad_field:is_nav_segment_blocked(follow_unit_nav_seg, data.SO_access)
-			and managers.navigation:itr_get_door_between(
+		local nav = managers.navigation
+		local pos = not nav._quad_field:is_nav_segment_blocked(follow_unit_nav_seg, data.SO_access)
+			and nav:itr_get_door_between(
 				data.itr_follow_unit_nav_seg,
 				follow_unit_nav_seg,
 				follow_unit:position(),
@@ -298,7 +301,6 @@ function CopLogicTravel._chk_stop_for_follow_unit(data, my_data)
 				[1] = follow_unit_nav_seg,
 				[2] = _update_destination(my_data, follow_unit_nav_seg, data.pos_rsrv_id),
 			}
-			coarse_path_nr = coarse_path_nr + 1
 
 			CopLogicTravel.itr_simplify_coarse_path(data, my_data)
 		end
@@ -307,6 +309,7 @@ function CopLogicTravel._chk_stop_for_follow_unit(data, my_data)
 	data.itr_follow_unit_nav_seg = follow_unit_nav_seg
 end
 
+-- CopActionWalk reports a fake completion when an extended action reaches its appended coarse step
 local itr_original_coplogictravel_actioncompleteclbk = CopLogicTravel.action_complete_clbk
 function CopLogicTravel.action_complete_clbk(data, action)
 	if action.itr_fake_complete then
@@ -319,21 +322,14 @@ function CopLogicTravel.action_complete_clbk(data, action)
 		itr_original_coplogictravel_actioncompleteclbk(data, action)
 	end
 end
-DelayedCalls:Add(
-	'DelayedModIter_actioncompleteclbk',
-	0,
-	function() TeamAILogicTravel.action_complete_clbk = CopLogicTravel.action_complete_clbk end
-)
+-- r203: team AI copies this callback; rebind once loaded in case its copy predates this hook
+DelayedCalls:Add('DelayedModIter_actioncompleteclbk', 0, function()
+	if TeamAILogicTravel then TeamAILogicTravel.action_complete_clbk = CopLogicTravel.action_complete_clbk end
+end)
 
 local itr_original_coplogictravel_chkrequestactionwalktoadvancepos =
 	CopLogicTravel._chk_request_action_walk_to_advance_pos
 function CopLogicTravel._chk_request_action_walk_to_advance_pos(data, my_data, ...)
-	if not _is_loud then
-		if my_data.advance_path and not my_data.advance_path[2] then
-			table.insert(my_data.advance_path, 1, mvector3.copy(data.m_pos)) -- or crash later when checking _simplified_path[2].x in CopActionWalk
-		end
-	end
-
 	itr_original_coplogictravel_chkrequestactionwalktoadvancepos(data, my_data, ...)
 
 	if my_data.path_ahead and my_data.advancing then my_data.advancing.itr_path_ahead = true end
@@ -344,7 +340,6 @@ function CopLogicTravel._check_start_path_ahead(data)
 
 	if my_data.processing_advance_path then return end
 
-	local objective = data.objective
 	local coarse_path = my_data.coarse_path
 	if not coarse_path then return end
 
@@ -354,19 +349,26 @@ function CopLogicTravel._check_start_path_ahead(data)
 	local s_path = walk_action._simplified_path
 	if not s_path then return end
 
-	local from_pos = CopActionWalk._nav_point_pos(s_path[#s_path])
-
 	local next_index = my_data.coarse_path_index + 2
 	if next_index > #coarse_path then return end
 
 	local to_pos = data.logic._get_exact_move_pos(data, next_index)
 	if not to_pos then return end
 
+	local from_nav_point = s_path[#s_path]
+	walk_action.itr_path_ahead_from = from_nav_point
 	my_data.processing_advance_path = true
 	local prio = data.logic.get_pathing_prio(data)
 	local nav_segs = CopLogicTravel._get_allowed_travel_nav_segs(data, my_data, to_pos)
 
-	data.brain:search_for_path_from_pos(my_data.advance_path_search_id, from_pos, to_pos, prio, nil, nav_segs)
+	data.brain:search_for_path_from_pos(
+		my_data.advance_path_search_id,
+		CopActionWalk._nav_point_pos(from_nav_point),
+		to_pos,
+		prio,
+		nil,
+		nav_segs
+	)
 end
 
 local itr_original_coplogictravel_updadvance = CopLogicTravel.upd_advance
